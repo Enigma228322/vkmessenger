@@ -1,0 +1,4 @@
+#pragma once
+#define VKM_VK_APP_ID "@VKM_VK_APP_ID@"
+#define VKM_VK_REDIRECT_URI "@VKM_VK_REDIRECT_URI@"
+#define VKM_VK_SCOPE "@VKM_VK_SCOPE@"
