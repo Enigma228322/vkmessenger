@@ -17,6 +17,8 @@ bool isPerson(const QString &value) { bool ok; auto id = value.toLongLong(&ok); 
 }
 
 ActionController::ActionController(Messenger *messenger) : QObject(messenger), m_messenger(messenger) {}
+void ActionController::cancelPending() { ++m_generation; m_busy = false; emit changed(); }
+
 void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; emit changed(); }
 
 void ActionController::invoke(const QString &method, Form parameters, Callback callback, bool refresh)
@@ -58,7 +60,7 @@ void ActionController::editMessage(const QString &peer, const QString &cmid, con
         attachments.append(id);
     }
     invoke("messages.edit", {{"peer_id", peer}, {"cmid", cmid}, {"message", text}, {"attachment", attachments.join(',')},
-        {"keep_forward_messages", "1"}, {"keep_snippets", "1"}});
+        {"keep_forward_messages", "1"}, {"keep_snippets", "1"}}, [this, peer, cmid](const QJsonValue &) { emit messageEdited(peer, cmid); });
 }
 
 void ActionController::deleteMessages(const QString &peer, const QStringList &cmids, bool forEveryone)
@@ -221,6 +223,11 @@ void ActionController::searchPeople(const QString &query)
         }
     }, false);
 }
+void ActionController::copyText(const QString &text)
+{
+    QGuiApplication::clipboard()->setText(text);
+}
+
 void ActionController::copyMessageLink(const QString &peer, const QString &cmid)
 {
     QUrl url("vkm://chat/" + peer); QUrlQuery query; query.addQueryItem("message", cmid); url.setQuery(query);
@@ -342,7 +349,7 @@ void ActionController::openAttachment(const QVariantMap &attachment)
 
 void ActionController::resetAccount()
 {
-    reset(); m_reactionAssets.clear(); m_reactionsLoading = false; m_reactionsCachedAt = 0; emit reactionAssetsChanged();
+    reset(); m_reactionAssets.clear(); m_selectableReactions.clear(); m_reactionsLoading = false; m_reactionsCachedAt = 0; emit reactionAssetsChanged();
 }
 QString ActionController::reactionImage(int reaction) const
 {
@@ -375,7 +382,12 @@ void ActionController::restoreReactionAssets(const QJsonObject &catalog)
     // Overrides replace only matching IDs, never the rest of the catalog.
     for (int i = 0; i < assets.size(); ++i) for (const auto &overrideValue : overrides)
         if (assets[i].toObject().value("reaction_id") == overrideValue.toObject().value("reaction_id")) { assets[i] = overrideValue; break; }
-    m_reactionAssets = safeJson(assets).toList(); emit reactionAssetsChanged();
+    m_reactionAssets = safeJson(assets).toList();
+    m_selectableReactions.clear();
+    const auto allowed = catalog.value("reaction_ids").toArray();
+    for (const auto &asset : m_reactionAssets)
+        if (!catalog.contains("reaction_ids") || allowed.contains(asset.toMap().value("reaction_id").toInt())) m_selectableReactions.append(asset);
+    emit reactionAssetsChanged();
 }
 void ActionController::cacheReactionAssets(const QJsonObject &catalog)
 {

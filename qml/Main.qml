@@ -16,34 +16,83 @@ ApplicationWindow {
     color: canvasColor
     font.family: Qt.platform.os === "osx" ? ".AppleSystemUIFont" : "sans-serif"
     font.pixelSize: 14
-    property color ink: darkTheme ? "#e4eaf2" : "#172536"
-    property color muted: "#788697"
-    property color accent: "#0077ff"
+    Theme { id: design; dark: window.darkTheme }
+    property bool flatMessages: messenger.flatMessages
+    property color ink: design.ink
+    property color muted: design.muted
+    property color accent: design.accent
     property bool restoringDraft: false
+    property string editingPeer: ""
+    property string editingMessage: ""
+    property bool editingHasAttachments: false
+    readonly property bool editing: editingMessage.length > 0
     property var submittedDrafts: ({})
     property string draftPeer: ""
     property bool wasAtEnd: true
     property string search: ""
     property int conversationFilter: 0
+    property bool unreadOnly: false
     property string savedAnchor: ""
     property real savedOffset: 0
+    property string geometryAnchor: ""
+    property real geometryOffset: 0
+    property bool restoringGeometry: false
     property string previousLast: ""
     property int newMessages: 0
     property var selectedIds: []
-    property bool darkTheme: Qt.styleHints.colorScheme === Qt.ColorScheme.Dark
-    property color surface: darkTheme ? "#202833" : "white"
-    property color secondarySurface: darkTheme ? "#2a3543" : "#f3f6fa"
-    property color canvasColor: darkTheme ? "#141b24" : "#f7f8fa"
+    property bool darkTheme: messenger.darkTheme
+    property color surface: design.surface
+    property color secondarySurface: design.secondary
+    property color canvasColor: design.canvas
     palette.window: surface
     palette.base: surface
     palette.text: ink
     palette.windowText: ink
     palette.buttonText: ink
-    palette.button: darkTheme ? "#303b49" : "#edf2f8"
+    palette.button: design.secondary
+    palette.highlight: accent
+    palette.highlightedText: darkTheme ? "#ffffff" : "#172536"
     function messageActions(kind, item) {
+        if (kind === "edit") {
+            if (messenger.actions.busy || item.local || !item.outgoing) return
+            editingPeer = messenger.selectedPeer
+            editingMessage = String(item.id)
+            editingHasAttachments = (item.attachments || []).length > 0
+            restoringDraft = true
+            composer.text = item.raw ? item.raw.text || "" : item.text || ""
+            restoringDraft = false
+            composer.forceActiveFocus()
+            composer.selectAll()
+            return
+        }
         const ids = selectedIds.length && (kind === "forward" || kind === "delete") ? selectedIds : [String(item.id)]
         actionSheet.canDeleteForAll = !!item.outgoing || messenger.canManageChat
         actionSheet.show(kind, messenger.selectedPeer, ids, item.raw ? (kind === "edit" ? item.raw.text || "" : item.raw.text || item.text || "") : item.text || "")
+    }
+    function cancelEditing() {
+        editingMessage = ""
+        editingPeer = ""
+        restoreDraft()
+        composer.forceActiveFocus()
+    }
+    function conversationMatches(item) {
+        messenger.folders.revision
+        return messenger.folders.contains(messenger.folders.selected, item.peer)
+            && item.title.toLowerCase().indexOf(window.search) !== -1
+            && (window.conversationFilter === 3 ? !!item.archived : !item.archived)
+            && (!window.unreadOnly || item.unread > 0 || !!item.markedUnread)
+            && (window.conversationFilter !== 2 || !!item.important)
+    }
+    readonly property string pinnedBoundaryPeer: {
+        messenger.conversations.revision
+        let hasPinned = false
+        for (let i = 0; i < messenger.conversations.rowCount(); ++i) {
+            const row = messenger.conversations.get(i)
+            if (!conversationMatches(row)) continue
+            if (row.pinned) hasPinned = true
+            else if (hasPinned) return String(row.peer)
+        }
+        return ""
     }
     function toggleSelection(id) {
         selectedIds = selectedIds.indexOf(id) >= 0 ? selectedIds.filter(function(x) { return x !== id }) : selectedIds.concat([id])
@@ -92,7 +141,9 @@ ApplicationWindow {
     Timer { interval: 700; running: window.active && messenger.connected && !messenger.demo; repeat: true; onTriggered: window.markVisibleMessagesRead() }
 
     function selectChat(peer, name) {
-        if (draftPeer.length) messenger.setDraftText(draftPeer, composer.text)
+        if (draftPeer.length && !window.editing) messenger.setDraftText(draftPeer, composer.text)
+        window.editingMessage = ""
+        window.editingPeer = ""
         messenger.selectConversation(peer, name)
         draftPeer = peer
         restoreDraft()
@@ -102,6 +153,7 @@ ApplicationWindow {
     }
 
     function restoreDraft() {
+        if (window.editing && window.editingPeer === messenger.selectedPeer) return
         restoringDraft = true
         composer.text = messenger.draftText
         restoringDraft = false
@@ -247,6 +299,10 @@ ApplicationWindow {
         }
         function onChanged() {
             if (messenger.selectedPeer !== window.draftPeer) {
+                window.editingMessage = ""
+                window.editingPeer = ""
+                messagePopup.close()
+                profilePanel.close()
                 window.draftPeer = messenger.selectedPeer
                 window.restoreDraft()
                 window.newMessages = 0
@@ -261,9 +317,12 @@ ApplicationWindow {
         function onDraftChanged() { window.restoreDraft() }
         function onScrollToEnd() { Qt.callLater(window.goToEnd) }
         function onScrollToMessage(cmid) {
+            window.wasAtEnd = false
+            tailPosition.stop()
             Qt.callLater(function() { const i = messenger.messages.find(cmid); if (i >= 0) history.positionViewAtIndex(i, ListView.Center) })
         }
         function onHistoryAboutToChange() {
+            messagePopup.close()
             window.wasAtEnd = history.atYEnd && !messenger.hasNewer
             window.savedAnchor = ""
             window.previousLast = history.count > 0 ? String(messenger.messages.get(history.count - 1).id) : ""
@@ -329,7 +388,7 @@ ApplicationWindow {
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 18
-                    spacing: 18
+                    spacing: 10
                     RowLayout {
                         Layout.fillWidth: true
                         Rectangle {
@@ -339,16 +398,16 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 1
-                            Text { text: "VK"; color: window.ink; font.pixelSize: 21; font.bold: true }
-                            Text { text: "VK Мессенджер"; color: window.muted; font.pixelSize: 11 }
+                            Text { text: "Мессенджер"; color: window.ink; font.pixelSize: 18; font.bold: true }
+
                         }
                         ActionButton {
                             text: "···"
                             quiet: true
                             implicitWidth: 38
                             leftPadding: 0; rightPadding: 0
-                            Accessible.name: "Настройки"
-                            onClicked: settings.open()
+                            Accessible.name: "Навигация и настройки"
+                            onClicked: navigationMenu.popup()
                         }
                     }
                     Input {
@@ -357,33 +416,52 @@ ApplicationWindow {
                         placeholderText: "Поиск диалогов"
                         onTextChanged: window.search = text.toLowerCase()
                     }
-                    RowLayout {
+                    Flickable {
                         Layout.fillWidth: true
-                        Text { text: "Сообщения" + (messenger.unreadCount > 0 ? " · " + messenger.unreadCount : ""); color: window.ink; font.pixelSize: 16; font.weight: Font.DemiBold; Layout.fillWidth: true }
-                        Text { text: "⌘ F"; color: "#a0aab7"; font.pixelSize: 11 }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        ActionButton { text: "+ Чат"; onClicked: actionSheet.show("create", "", [], "") }
-                        ActionButton { text: "Диалог"; onClicked: actionSheet.show("peers", "", [], "") }
-                        ActionButton { text: "Важное"; onClicked: actionSheet.show("important", "", [], "") }
-                    }
-                    ComboBox {
-                        Layout.fillWidth: true
-                        model: ["Все диалоги", "Непрочитанные", "Важные", "Архив"]
-                        onActivated: window.conversationFilter = currentIndex
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        ComboBox {
-                            id: folderChoice
-                            Layout.fillWidth: true
-                            textRole: "name"; valueRole: "id"
-                            model: [{id: "", name: "Все папки"}].concat(messenger.folders.items)
-                            currentIndex: { const selected = messenger.folders.selected; for (let i = 0; i < model.length; ++i) if (model[i].id === selected) return i; return 0 }
-                            onActivated: messenger.folders.selected = currentValue
+                        Layout.preferredHeight: 38
+                        contentWidth: categoryTabs.implicitWidth
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        Row {
+                            id: categoryTabs
+                            spacing: 4
+                            Repeater {
+                                model: [{name:"Все", value:0}, {name:"Важные", value:2}, {name:"Архив", value:3}]
+                                delegate: Button {
+                                    required property var modelData
+                                    text: modelData.name
+                                    background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent" }
+                                    highlighted: window.conversationFilter === modelData.value
+                                    onClicked: window.conversationFilter = modelData.value
+                                }
+                            }
                         }
-                        ActionButton { text: "···"; implicitWidth: 32; Accessible.name: "Управление папками"; onClicked: folderSheet.show() }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: messenger.folders.items.length > 0
+                        Flickable {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 38
+                            clip: true
+                            contentWidth: folderTabs.implicitWidth
+                            boundsBehavior: Flickable.StopAtBounds
+                            Row {
+                                id: folderTabs
+                                spacing: 4
+                                Repeater {
+                                    model: [{id:"", name:"Все папки"}].concat(messenger.folders.items)
+                                    delegate: Button {
+                                        required property var modelData
+                                        text: modelData.name
+                                        background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent" }
+                                        highlighted: messenger.folders.selected === modelData.id
+                                        onClicked: messenger.folders.selected = modelData.id
+                                    }
+                                }
+                            }
+                        }
+                        ToolButton { text:"…"; Accessible.name:"Управление папками"; onClicked: folderSheet.show() }
                     }
                     ListView {
                         id: chats
@@ -397,19 +475,24 @@ ApplicationWindow {
                             id: chat
                             required property var item
                             required property int index
-                            property bool inFolder: { messenger.folders.revision; return messenger.folders.contains(messenger.folders.selected, item.peer) }
-                            property bool matches: inFolder && item.title.toLowerCase().indexOf(window.search) !== -1
-                                && (window.conversationFilter === 3 ? !!item.archived : !item.archived)
-                                && (window.conversationFilter !== 1 || item.unread > 0 || !!item.markedUnread)
-                                && (window.conversationFilter !== 2 || !!item.important)
+                            property bool matches: window.conversationMatches(item)
+                            readonly property bool startsUnpinned: matches && String(item.peer) === window.pinnedBoundaryPeer
                             width: ListView.view.width
-                            height: matches ? 78 : 0
+                            height: matches ? 66 + (startsUnpinned ? 12 : 0) : 0
                             visible: matches
                             radius: 12
-                            color: messenger.selectedPeer === item.peer ? (window.darkTheme ? "#263f5c" : "#eaf3ff") : mouse.containsMouse ? window.secondarySurface : "transparent"
+                            color: messenger.selectedPeer === item.peer ? (window.darkTheme ? "#333333" : "#eaf3ff") : mouse.containsMouse ? window.secondarySurface : "transparent"
+                            Rectangle {
+                                objectName: "pinnedChatsDivider"
+                                visible: chat.startsUnpinned
+                                x: 10; y: 5
+                                width: parent.width - 20; height: 1
+                                color: design.divider
+                            }
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.margins: 10
+                                anchors.topMargin: 10 + (chat.startsUnpinned ? 12 : 0)
                                 spacing: 11
                                 Avatar { name: chat.item.title; source: chat.item.avatar || ""; tint: chat.index }
                                 ColumnLayout {
@@ -457,7 +540,8 @@ ApplicationWindow {
                             lineHeight: 1.4
                         }
                     }
-                    Rectangle { Layout.fillWidth: true; height: 1; color: "#edf0f4" }
+                    Switch { Layout.fillWidth: true; text: "Только непрочитанные"; checked: window.unreadOnly; onToggled: window.unreadOnly = checked }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: design.divider }
                     RowLayout {
                         Layout.fillWidth: true
                         Rectangle { width: 7; height: 7; radius: 4; color: messenger.demo ? "#e4ae57" : messenger.connected ? "#57b894" : "#aab4c0" }
@@ -472,7 +556,7 @@ ApplicationWindow {
                     }
                 }
             }
-            Rectangle { Layout.fillHeight: true; width: 1; color: "#e6ebf1" }
+            Rectangle { Layout.fillHeight: true; width: 1; color: design.divider }
 
             Item {
                 Layout.fillWidth: true
@@ -524,7 +608,9 @@ ApplicationWindow {
                         visible: !messenger.connected
                         text: "Попробовать демоверсию"
                         quiet: true
-                        onClicked: { messenger.startDemo(); window.draftPeer = messenger.selectedPeer }
+                        onClicked: { messenger.startDemo(); messagePopup.close()
+                profilePanel.close()
+                window.draftPeer = messenger.selectedPeer }
                     }
                 }
 
@@ -558,20 +644,27 @@ ApplicationWindow {
                                 Text { Layout.fillWidth: true; text: messenger.title; color: window.ink; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
                                 Text { Layout.fillWidth: true; text: messenger.peerActivity; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                             }
-                            ActionButton { text: "Обновить"; quiet: true; onClicked: messenger.reload() }
-                            ActionButton { text: "Поиск"; quiet: true; onClicked: actionSheet.show("search", messenger.selectedPeer, [], "") }
-                            ActionButton { text: "···"; quiet: true; onClicked: conversationMenu.popup() }
+                            ToolButton { id: profileButton; implicitWidth: 36; Accessible.name: "Информация о переписке"; contentItem: ActionIcon { kind: "info"; stroke: window.muted }
+                                onClicked: profilePanel.present(profileButton) }
+                            ToolButton { implicitWidth: 36; Accessible.name: "Обновить"; contentItem: ActionIcon { kind: "retry"; stroke: window.muted }
+                                onClicked: messenger.reload() }
+                            ToolButton { implicitWidth: 36; Accessible.name: "Поиск в переписке"; contentItem: ActionIcon { kind: "search"; stroke: window.muted }
+                                onClicked: actionSheet.show("search", messenger.selectedPeer, [], "") }
+                            ToolButton { text: "···"; implicitWidth: 36; Accessible.name: "Действия с перепиской"; onClicked: conversationMenu.popup() }
                         }
-                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#e9edf2" }
+                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: design.divider }
                     }
-                    RowLayout {
+                    PinnedMessageBar {
                         Layout.fillWidth: true
                         Layout.leftMargin: 22
                         Layout.rightMargin: 22
                         visible: !!messenger.pinnedMessage.conversation_message_id
-                        Label { Layout.fillWidth: true; text: "Закреплено: " + (messenger.pinnedMessage.text || "Вложение"); elide: Text.ElideRight; textFormat: Text.PlainText }
-                        Button { text: "Перейти"; onClicked: messenger.openMessage(messenger.selectedPeer, String(messenger.pinnedMessage.conversation_message_id)) }
-                        Button { text: "Открепить"; onClicked: messenger.actions.setPinnedMessage(messenger.selectedPeer, "", false) }
+                        messageText: messenger.pinnedMessage.text || ""
+                        textColor: window.ink
+                        secondaryColor: window.muted
+                        busy: messenger.actions.busy
+                        onOpenMessage: messenger.openMessage(messenger.selectedPeer, String(messenger.pinnedMessage.conversation_message_id))
+                        onUnpin: messenger.actions.setPinnedMessage(messenger.selectedPeer, "", false)
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -606,9 +699,10 @@ ApplicationWindow {
                             Button { anchors.centerIn: parent; visible: parent.height > 0; text: messenger.loading ? "Загрузка…" : "Загрузить предыдущие сообщения"; enabled: !messenger.loading; onClicked: messenger.loadOlder() }
                         }
                         onMovementEnded: window.wasAtEnd = atYEnd
-                        onMovementStarted: { window.wasAtEnd = false; tailPosition.stop() }
-                        onContentHeightChanged: { if (window.wasAtEnd) tailPosition.restart() }
+                        onMovementStarted: { window.wasAtEnd = false; tailPosition.stop(); messagePopup.close() }
+                        onContentHeightChanged: { if (window.wasAtEnd) tailPosition.restart(); geometrySnapshot.restart() }
                         onContentYChanged: {
+                            geometrySnapshot.restart()
                             if (moving || dragging) window.wasAtEnd = atYEnd
                             if (atYEnd && !messenger.hasNewer) window.newMessages = 0
                         }
@@ -636,7 +730,12 @@ ApplicationWindow {
                                 return reactions.reduce(function(total, reaction) { return total + 43 + reactionMetrics.advanceWidth(String(reaction.count)) }, 0)
                             }
                             width: history.width
-                            height: entry.item.gap ? 54 : bubble.height
+                            height: entry.item.gap ? 54 : bubble.y + bubble.height + (window.flatMessages ? 3 : 0)
+                            readonly property bool groupStart: item.groupStart !== false
+                            readonly property real headingHeight: window.flatMessages ? (dateHeading.visible ? 30 : 0) + (unreadHeading.visible ? 28 : 0) + (groupStart ? 14 : 0) : 0
+                            Text { id: dateHeading; objectName: "dateSeparator"; width: parent.width; height: 30; visible: window.flatMessages && !!entry.item.dateLabel; text: entry.item.dateLabel || ""; color: window.muted; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
+                            Text { id: unreadHeading; width: parent.width; y: dateHeading.visible ? 30 : 0; height: 28; visible: window.flatMessages && !!entry.item.unreadStart; text: "Непрочитанные сообщения"; color: window.accent; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
+                            Avatar { visible: window.flatMessages && entry.groupStart && !entry.item.gap; x: entry.inset; y: entry.headingHeight + 3; width: design.avatarSize; height: width; name: entry.item.sender || (entry.item.outgoing ? "Вы" : messenger.title); source: entry.item.senderAvatar || "" }
                             CheckBox {
                                 visible: window.selectedIds.length > 0 && !entry.item.gap && !entry.item.local
                                 checked: window.selectedIds.indexOf(String(entry.item.id)) >= 0
@@ -664,8 +763,9 @@ ApplicationWindow {
                                 visible: !entry.item.gap
                                 property real horizontalPadding: entry.stickerOnly ? 4 : 12
                                 property real verticalPadding: entry.stickerOnly ? 2 : 9
-                                x: entry.item.outgoing ? entry.width - entry.inset - width : entry.inset
-                                width: Math.min(560, entry.width - 2 * entry.inset, entry.width * 0.80,
+                                y: entry.headingHeight
+                                x: window.flatMessages ? entry.inset + design.avatarSize + 12 : entry.item.outgoing ? entry.width - entry.inset - width : entry.inset
+                                width: window.flatMessages ? Math.max(1, Math.min(design.messageWidth, entry.width - x - entry.inset)) : Math.min(560, entry.width - 2 * entry.inset, entry.width * 0.80,
                                     Math.max(84, entry.reactionsWidth + horizontalPadding * 2, Math.ceil(footerMeasure.advanceWidth) + 24 + horizontalPadding * 2, Math.ceil(entry.bodyWidth) + 2 + horizontalPadding * 2,
                                         (entry.item.attachments || []).length ? 240 : 0,
                                         entry.item.raw && entry.item.raw.reply_message ? 240 : 0,
@@ -673,49 +773,33 @@ ApplicationWindow {
                                         entry.item.raw && entry.item.raw.keyboard ? 280 : 0))
                                 height: Math.ceil(bubbleLayout.implicitHeight) + verticalPadding * 2
                                 radius: 15
-                                color: entry.stickerOnly ? "transparent" : entry.item.outgoing ? (window.darkTheme ? "#234466" : "#dfedff") : window.surface
-                                border.color: window.selectedIds.indexOf(String(entry.item.id)) >= 0 ? window.accent : entry.stickerOnly ? "transparent" : (window.darkTheme ? "#364558" : "#e8edf3")
+                                color: window.flatMessages || entry.stickerOnly ? "transparent" : entry.item.outgoing ? (window.darkTheme ? "#234466" : "#dfedff") : window.surface
+                                border.color: window.selectedIds.indexOf(String(entry.item.id)) >= 0 ? window.accent : window.flatMessages || entry.stickerOnly ? "transparent" : (window.darkTheme ? "#364558" : "#e8edf3")
                                 HoverHandler { id: bubbleHover }
                                 ToolButton {
                                     text: "···"; width: 24; height: 24; padding: 0
-                                    x: entry.item.outgoing ? -28 : bubble.width + 4
+                                    x: window.flatMessages ? bubble.width - width : entry.item.outgoing ? -28 : bubble.width + 4
                                     y: 0
-                                    visible: bubbleHover.hovered || hovered || messageMenu.opened || activeFocus
-                                    onClicked: messageMenu.popup()
+                                    visible: bubbleHover.hovered || hovered || (messagePopup.opened && messagePopup.origin === bubble) || activeFocus
+                                    onClicked: messagePopup.showAt(bubble, entry.item, messageText)
                                     Accessible.name: "Действия с сообщением"
                                 }
-                                MouseArea { anchors.fill: parent; acceptedButtons: Qt.RightButton; onClicked: messageMenu.popup() }
-                                Menu {
-                                    id: messageMenu
-                                    MenuItem { text: "Копировать ссылку"; visible: !entry.item.local; onTriggered: messenger.actions.copyMessageLink(messenger.selectedPeer, String(entry.item.id)) }
-                                    MenuItem { text: "Выбрать"; visible: !entry.item.local; onTriggered: window.toggleSelection(String(entry.item.id)) }
-                                    MenuItem { text: "Ответить"; enabled: !entry.item.local; onTriggered: messenger.setReply(entry.item.id) }
-                                    MenuItem { text: "Переслать"; visible: !entry.item.local; onTriggered: window.messageActions("forward", entry.item) }
-                                    MenuItem { text: "Редактировать"; visible: !entry.item.local; enabled: !!entry.item.outgoing; onTriggered: window.messageActions("edit", entry.item) }
-                                    MenuItem { text: "Удалить…"; visible: !entry.item.local; onTriggered: window.messageActions("delete", entry.item) }
-                                    MenuItem { text: entry.item.important ? "Убрать из важных" : "Добавить в важные"; visible: !entry.item.local; onTriggered: messenger.actions.setImportant(messenger.selectedPeer, String(entry.item.id), !entry.item.important) }
-                                    MenuItem { text: "Закрепить"; visible: !entry.item.local; onTriggered: messenger.actions.setPinnedMessage(messenger.selectedPeer, String(entry.item.id), true) }
-                                    MenuItem { text: "Поставить реакцию"; visible: !entry.item.local; onTriggered: { reactionPicker.peer = messenger.selectedPeer; reactionPicker.cmid = entry.item.id; reactionPicker.open() } }
-                                    MenuItem { text: "Убрать реакцию"; visible: !entry.item.local; onTriggered: messenger.actions.setReaction(messenger.selectedPeer, String(entry.item.id), 0) }
-                                    MenuItem { text: "Кто отреагировал"; visible: !entry.item.local; onTriggered: actionSheet.show("reacted", messenger.selectedPeer, [String(entry.item.id)], "") }
-                                    MenuItem { text: "Повторить отправку"; visible: !!entry.item.local && entry.item.delivery !== "sent"; enabled: entry.item.delivery !== "sending"; onTriggered: messenger.retryOutgoing(entry.item.id) }
-                                    MenuItem { text: "Убрать из очереди"; visible: !!entry.item.local && entry.item.delivery !== "sent"; enabled: entry.item.delivery !== "sending"; onTriggered: messenger.cancelOutgoing(entry.item.id) }
-                                }
+                                MouseArea { anchors.fill: parent; acceptedButtons: Qt.RightButton; onClicked: messagePopup.showAt(bubble, entry.item, messageText) }
                                 Column {
                                     id: bubbleLayout
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.top: parent.top
                                     anchors.leftMargin: bubble.horizontalPadding
-                                    anchors.rightMargin: bubble.horizontalPadding
+                                    anchors.rightMargin: bubble.horizontalPadding + (window.flatMessages ? Math.min(120, Math.ceil(footerMeasure.advanceWidth) + 30) : 0)
                                     anchors.topMargin: bubble.verticalPadding
                                     spacing: 5
                                     Text {
                                         width: bubbleLayout.width
-                                        visible: !entry.item.outgoing && !messenger.demo
-                                        text: entry.item.sender || ""
+                                        visible: window.flatMessages ? entry.groupStart : !entry.item.outgoing && !messenger.demo
+                                        text: entry.item.sender || (entry.item.outgoing ? "Вы" : messenger.title)
                                         elide: Text.ElideRight
-                                        color: "#6485a8"; font.pixelSize: 10
+                                        color: window.accent; font.pixelSize: 14; font.weight: Font.DemiBold
                                     }
                                     RowLayout {
                                         width: bubbleLayout.width
@@ -737,7 +821,7 @@ ApplicationWindow {
                                         selectByMouse: true
                                         wrapMode: TextEdit.Wrap
                                         color: window.ink
-                                        font.pixelSize: 14
+                                        font.pixelSize: design.bodySize
                                         selectionColor: "#adcfff"
                                     }
                                     AttachmentView { width: bubbleLayout.width; attachments: entry.item.attachments || []; animationsEnabled: entry.inViewport && window.active && !messenger.reduceMotion }
@@ -792,23 +876,32 @@ ApplicationWindow {
                                     RowLayout {
                                         id: footerRow
                                         objectName: "messageFooter"
-                                        width: bubbleLayout.width
+                                        parent: window.flatMessages ? bubble : bubbleLayout
+                                        width: window.flatMessages ? Math.min(120, Math.ceil(footerMeasure.advanceWidth) + 26) : bubbleLayout.width
+                                        x: window.flatMessages ? bubble.width - width - bubble.horizontalPadding : 0
+                                        y: window.flatMessages ? bubble.height - height - bubble.verticalPadding : 0
                                         Layout.fillHeight: false
                                         spacing: 4
+                                        Item { Layout.fillWidth: true }
+                                        ReadIndicator {
+                                            visible: window.flatMessages && !!entry.item.outgoing && (!entry.item.local || entry.item.delivery === "sent")
+                                            read: !!entry.item.read
+                                            Layout.preferredWidth: 18; Layout.preferredHeight: 14
+                                        }
                                         Text {
                                             id: timestampText
                                             objectName: "messageTimestamp"
                                             Layout.minimumWidth: 0
-                                            Layout.fillWidth: true
+                                            Layout.preferredWidth: Math.min(implicitWidth, Math.max(1, footerRow.width - 26))
                                             horizontalAlignment: Text.AlignRight
                                             elide: Text.ElideRight
                                             text: window.deliveryText(entry.item)
                                             color: entry.item.delivery === "failed" ? "#d17a6b" : "#8295a9"
-                                            font.pixelSize: 10
+                                            font.pixelSize: 11
                                             MouseArea { anchors.fill: parent; enabled: !!entry.item.local && entry.item.delivery === "failed"; cursorShape: Qt.PointingHandCursor; onClicked: messenger.retryOutgoing(entry.item.id) }
                                         }
                                         ReadIndicator {
-                                            visible: !!entry.item.outgoing && (!entry.item.local || entry.item.delivery === "sent")
+                                            visible: !window.flatMessages && !!entry.item.outgoing && (!entry.item.local || entry.item.delivery === "sent")
                                             read: !!entry.item.read
                                             Layout.preferredWidth: 18
                                             Layout.preferredHeight: 14
@@ -849,9 +942,18 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.leftMargin: 22
                         Layout.rightMargin: 22
-                        visible: Object.keys(messenger.reply).length > 0
+                        visible: !window.editing && Object.keys(messenger.reply).length > 0
                         Label { Layout.fillWidth: true; text: "Ответ: " + (messenger.reply.text || ""); elide: Text.ElideRight; textFormat: Text.PlainText }
                         Button { text: "×"; onClicked: messenger.clearReply() }
+                    }
+                    RowLayout {
+                        objectName: "editMessageBanner"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 24; Layout.rightMargin: 24
+                        visible: window.editing
+                        ActionIcon { kind: "edit"; stroke: window.accent }
+                        Label { Layout.fillWidth: true; text: "Редактирование сообщения" + (window.editingHasAttachments ? " · вложения сохраняются" : ""); color: window.accent; elide: Text.ElideRight }
+                        ToolButton { text: "×"; Accessible.name: "Отменить редактирование"; onClicked: window.cancelEditing() }
                     }
                     BotKeyboard {
                         objectName: "currentBotKeyboard"
@@ -870,7 +972,7 @@ ApplicationWindow {
                             required property var modelData
                             required property int index
                             Layout.fillWidth: true
-                            visible: modelData.peer === messenger.selectedPeer
+                            visible: !window.editing && modelData.peer === messenger.selectedPeer
                             Label { Layout.fillWidth: true; text: modelData.name; elide: Text.ElideRight }
                             Button { text: "Убрать"; onClicked: messenger.transfers.remove(index) }
                         }
@@ -902,7 +1004,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 11
                             spacing: 12
-                            ActionButton { text: "+"; enabled: !messenger.demo; onClicked: uploadMenu.popup() }
+                            ActionButton { text: "+"; enabled: !messenger.demo && !window.editing; onClicked: uploadMenu.popup() }
                             ScrollView {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: Math.min(130, Math.max(40, composer.implicitHeight))
@@ -917,11 +1019,15 @@ ApplicationWindow {
                                     selectByMouse: true
                                     background: Item {}
                                     onTextChanged: {
-                                        if (!window.restoringDraft) messenger.setDraftText(messenger.selectedPeer, text)
-                                        if (activeFocus && text.length) messenger.typing()
+                                        if (!window.restoringDraft && !window.editing) messenger.setDraftText(messenger.selectedPeer, text)
+                                        if (activeFocus && text.length && !window.editing) messenger.typing()
                                     }
                                     function submit() { submitWithMode(false) }
                                     function submitWithMode(silent) {
+                                        if (window.editing) {
+                                            if (!messenger.actions.busy) messenger.actions.editMessage(window.editingPeer, window.editingMessage, text)
+                                            return
+                                        }
                                         if (messenger.sending) return
                                         window.submittedDrafts[messenger.selectedPeer] = text
                                         messenger.sendWithOptions(text, silent === true)
@@ -938,14 +1044,15 @@ ApplicationWindow {
                             }
                             ActionButton {
                                 id: sendButton
-                                text: messenger.sending ? "Отправка…" : "Отправить ↑"
+                                text: window.editing ? (messenger.actions.busy ? "Сохранение…" : "Сохранить") : messenger.sending ? "Отправка…" : "Отправить ↑"
                                 primary: true
-                                enabled: (composer.text.trim().length > 0 || messenger.transfers.pending.some(function(p) { return p.peer === messenger.selectedPeer })) && !messenger.sending && !messenger.authorizing && messenger.canWrite
+                                enabled: (window.editing ? (composer.text.trim().length > 0 || window.editingHasAttachments) : (composer.text.trim().length > 0 || messenger.transfers.pending.some(function(p) { return p.peer === messenger.selectedPeer }))) && !messenger.sending && (!window.editing || !messenger.actions.busy) && !messenger.authorizing && messenger.canWrite
                                 onClicked: composer.submit()
                             }
                             ActionButton {
                                 text: "⌄"; implicitWidth: 32; leftPadding: 0; rightPadding: 0
                                 enabled: sendButton.enabled
+                                visible: !window.editing
                                 Accessible.name: "Способ отправки"
                                 onClicked: sendOptions.popup()
                                 Menu { id: sendOptions; MenuItem { text: "Отправить без звука"; onTriggered: composer.submitWithMode(true) } }
@@ -964,6 +1071,17 @@ ApplicationWindow {
         }
     }
 
+    ConversationProfile {
+        id: profilePanel
+        parent: Overlay.overlay
+        theme: design
+        client: messenger
+        controller: messenger.profileActions
+        onActionRequested: function(kind) {
+            if (kind === "settings" || kind === "notifications") conversationMenu.popup()
+            else actionSheet.show(kind, messenger.selectedPeer, [], "")
+        }
+    }
     FolderSheet { id: folderSheet; parent: Overlay.overlay; reducedMotion: messenger.reduceMotion }
 
     Loader {
@@ -976,9 +1094,16 @@ ApplicationWindow {
         mediaViewerLoader.active = true
         mediaViewerLoader.item.present(source, type, title)
     }
-    Connections { target: messenger.actions; function onMediaRequested(source, type, title) { window.presentMedia(source, type, title) } }
+    Connections {
+        target: messenger.actions
+        function onMediaRequested(source, type, title) { window.presentMedia(source, type, title) }
+        function onMessageEdited(peer, cmid) {
+            if (window.editingPeer === peer && window.editingMessage === cmid) window.cancelEditing()
+        }
+    }
     ActionSheet { id: actionSheet; parent: Overlay.overlay; reducedMotion: messenger.reduceMotion }
-    Shortcut { sequence: "Escape"; enabled: window.selectedIds.length > 0; onActivated: window.selectedIds = [] }
+    Shortcut { sequence: "Escape"; enabled: window.editing && !messagePopup.opened && !profilePanel.opened; onActivated: window.cancelEditing() }
+    Shortcut { sequence: "Escape"; enabled: !window.editing && window.selectedIds.length > 0; onActivated: window.selectedIds = [] }
     Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
@@ -998,6 +1123,61 @@ ApplicationWindow {
             Button { text: "Открыть"; visible: messenger.toastUrl.toString().length > 0; onClicked: Qt.openUrlExternally(messenger.toastUrl) }
         }
     }
+    MessageActionPopup {
+        id: messagePopup
+        parent: Overlay.overlay
+        theme: design
+        actions: messenger.actions
+        canManage: messenger.canManageChat
+        reduceMotion: messenger.reduceMotion
+        onCommand: function(kind) {
+            const item = messagePopup.message, id = String(item.id)
+            if (kind.indexOf("reaction:") === 0) messenger.actions.setReaction(messenger.selectedPeer, id, Number(kind.split(":")[1]))
+            else if (kind === "reply") messenger.setReply(id)
+            else if (kind === "copy") messenger.actions.copyText(item.raw ? item.raw.text || "" : item.text || "")
+            else if (kind === "important") messenger.actions.setImportant(messenger.selectedPeer, id, !item.important)
+            else if (kind === "select") window.toggleSelection(id)
+            else if (kind === "pin") messenger.actions.setPinnedMessage(messenger.selectedPeer, id, true)
+            else if (kind === "link") messenger.actions.copyMessageLink(messenger.selectedPeer, id)
+            else if (kind === "reacted") actionSheet.show("reacted", messenger.selectedPeer, [id], "")
+            else if (kind === "retry") messenger.retryOutgoing(id)
+            else if (kind === "cancel") messenger.cancelOutgoing(id)
+            else window.messageActions(kind, item)
+        }
+    }
+    function rememberGeometryAnchor() {
+        if (!history || window.restoringGeometry) return
+        for (let i = 0; i < history.count; ++i) {
+            const row = history.itemAtIndex(i)
+            if (row && row.y + row.height > history.contentY) {
+                window.geometryAnchor = String(row.item.id)
+                window.geometryOffset = history.contentY - row.y
+                return
+            }
+        }
+    }
+    Timer { id: geometrySnapshot; interval: 40; onTriggered: window.rememberGeometryAnchor() }
+    function restoreGeometryAnchor() {
+        if (!history || !messenger.connected) return
+        // Width-change signals can arrive after delegates have already reflowed.
+        // Use the last settled viewport, not partially updated row geometry.
+        const atEnd = window.wasAtEnd
+        const anchor = window.geometryAnchor, offset = window.geometryOffset
+        window.restoringGeometry = true
+        Qt.callLater(function() {
+            if (atEnd) window.goToEnd()
+            else if (anchor.length) {
+                history.forceLayout()
+                const i = messenger.messages.find(anchor)
+                if (i >= 0) { history.positionViewAtIndex(i, ListView.Beginning); history.contentY += offset }
+            }
+            window.restoringGeometry = false
+            geometrySnapshot.restart()
+        })
+    }
+    onFlatMessagesChanged: restoreGeometryAnchor()
+    onWidthChanged: { messagePopup.close(); restoreGeometryAnchor() }
+    onHeightChanged: { messagePopup.close(); restoreGeometryAnchor() }
     Dialog {
         id: reactionPicker
         objectName: "reactionPicker"
@@ -1037,6 +1217,14 @@ ApplicationWindow {
             }
         }
 
+    }
+    Menu {
+        id: navigationMenu
+        MenuItem { text: "Создать беседу"; onTriggered: actionSheet.show("create", "", [], "") }
+        MenuItem { text: "Новый диалог"; onTriggered: actionSheet.show("peers", "", [], "") }
+        MenuItem { text: "Важные сообщения"; onTriggered: actionSheet.show("important", "", [], "") }
+        MenuItem { text: "Управление папками"; onTriggered: folderSheet.show() }
+        MenuItem { text: "Настройки"; onTriggered: settings.open() }
     }
     Menu {
         id: conversationMenu
@@ -1139,6 +1327,8 @@ ApplicationWindow {
         background: Rectangle { color: window.surface; radius: 16; border.color: "#e2e8f0" }
         contentItem: ColumnLayout {
             spacing: 12
+            CheckBox { text: "Тёмная тема"; checked: window.darkTheme; onToggled: messenger.darkTheme = checked }
+            CheckBox { text: "Сообщения без пузырей"; checked: window.flatMessages; onToggled: messenger.flatMessages = checked }
             CheckBox { text: "Уменьшить анимацию"; checked: messenger.reduceMotion; onToggled: messenger.reduceMotion = checked }
             ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: { messenger.refreshCacheStats(); cacheDialog.open() } }
             TokenLogin {

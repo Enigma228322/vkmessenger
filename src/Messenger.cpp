@@ -1,3 +1,4 @@
+#include "models/TimelinePresentation.h"
 #include "Messenger.h"
 #include "Keychain.h"
 #include "Form.h"
@@ -54,7 +55,7 @@ static QString mediaDirectory(const QString &overridePath)
 }
 
 Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QString &storagePath, bool persistentSession)
-    : QObject(parent), m_store(storageDirectory(storagePath)), m_actions(this), m_folders(this),
+    : QObject(parent), m_store(storageDirectory(storagePath)), m_actions(this), m_profileActions(this), m_folders(this),
       m_media(mediaDirectory(storagePath), nullptr, network),
       m_oauth(this), m_longPoll(this, network),
       m_transfers([this](const QString &method, Form parameters, Transfers::Result callback) {
@@ -125,7 +126,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
         m_api.cancel();
         m_outboxSending = false;
         for (auto &pending : m_outgoing) if (pending.value("state").toString() == "sending") pending.insert("state", "uncertain");
-        m_actions.resetAccount(); m_folders.reset(false);
+        m_actions.resetAccount(); m_profileActions.cancelPending(); m_folders.reset(false);
         m_transfers.pause();
         m_readPending.clear();
         m_operationBusy = false;
@@ -273,7 +274,7 @@ void Messenger::logout()
     if (m_persistentSession) Keychain::clear();
     m_connected = m_demo = m_sending = m_loading = m_authorizing = false;
     m_offline = m_outboxSending = false; m_queueWrites = 0;
-    m_account.clear(); m_drafts.clear(); m_outgoing.clear(); m_actions.resetAccount(); m_folders.reset(); m_media.setAccount({});
+    m_account.clear(); m_drafts.clear(); m_outgoing.clear(); m_actions.resetAccount(); m_profileActions.resetAccount(); m_folders.reset(); m_media.setAccount({});
     m_fetchingHistory = m_fetchingConversations = false;
     m_conversationsDirty = m_historyDirty = false;
     m_activity.clear(); m_online.clear(); m_outRead.clear(); m_unreadCount = 0;
@@ -621,6 +622,7 @@ void Messenger::rebuildConversations()
             {"time", last.isEmpty() ? QString() : QDateTime::fromSecsSinceEpoch(last.value("date").toInteger()).toString("HH:mm")},
             {"sort", convo.value("sort_id").toObject().value("major_id").toInteger(last.value("date").toInteger())},
             {"minor", convo.value("sort_id").toObject().value("minor_id").toInteger()},
+            {"pinned", (sort.value("major_id").toInteger() & ((1 << 4) | (1 << 5) | (1 << 6))) != 0},
             {"important", convo.value("important").toBool() || (flags & 1) != 0},
             {"archived", (flags & (1 << 23)) != 0}, {"markedUnread", (flags & (1 << 20)) != 0},
             {"canWrite", convo.value("can_write").toObject().value("allowed").toBool(true)}});
@@ -646,7 +648,7 @@ QVariantMap Messenger::message(const QJsonObject &object) const
         {"edited", object.value("update_time").toInteger() > 0},
         {"attachments", safeJson(object.value("attachments"))},
         {"time", QDateTime::fromSecsSinceEpoch(object.value("date").toInteger()).toString("dd.MM · HH:mm")},
-        {"sender", name.isEmpty() ? id(object.value("from_id")) : name}};
+        {"sender", name.isEmpty() ? id(object.value("from_id")) : name}, {"senderAvatar", sender.value("photo_100").toString()}};
 }
 
 void Messenger::publishHistory()
@@ -674,11 +676,11 @@ void Messenger::publishHistory()
         rows.append(QVariantMap{{"id", pending.value("local_id").toString()}, {"identity", pending.value("local_id").toString()}, {"local", true},
             {"text", pending.value("text").toString()}, {"outgoing", true}, {"read", false},
             {"time", QDateTime::fromSecsSinceEpoch(pending.value("created").toInteger()).toString("HH:mm")},
-            {"delivery", state}, {"deliveryError", pending.value("error").toString()},
+            {"sentAt", pending.value("created").toInteger()}, {"sender", "Вы"}, {"delivery", state}, {"deliveryError", pending.value("error").toString()},
             {"raw", safeJson(pending.value("preview"))}, {"attachments", safeJson(pending.value("preview").toObject().value("attachments"))}});
     }
     emit historyAboutToChange();
-    m_messages.reconcile(rows);
+    m_messages.reconcile(TimelinePresentation::decorate(rows, m_inRead.value(m_peer)));
     emit historyChanged();
 }
 
@@ -700,7 +702,7 @@ void Messenger::selectConversation(const QString &peer, const QString &title)
     m_loading = false;
     m_historyError.clear();
     m_replyMessage = m_drafts.value(peer).value("reply").toObject().toVariantMap();
-    if (m_demo) m_messages.replace(m_demoHistory.value(peer));
+    if (m_demo) m_messages.replace(TimelinePresentation::decorate(m_demoHistory.value(peer)));
     else { publishHistory(); readCachedHistory(peer); }
     emit draftChanged();
     emit changed();
@@ -859,8 +861,8 @@ void Messenger::sendWithOptions(const QString &text, bool silent)
     const auto peer = m_peer;
     if (m_demo) {
         m_demoHistory[peer].append(QVariantMap{{"id", OAuth::randomString()}, {"text", text}, {"outgoing", true},
-            {"time", QDateTime::currentDateTime().toString("dd.MM · HH:mm")}, {"sender", "Вы"}});
-        m_messages.replace(m_demoHistory[peer]);
+            {"sentAt", QDateTime::currentSecsSinceEpoch()}, {"time", QDateTime::currentDateTime().toString("dd.MM · HH:mm")}, {"sender", "Вы"}});
+        m_messages.replace(TimelinePresentation::decorate(m_demoHistory[peer]));
         auto rows = m_conversations.rows;
         for (auto &row : rows) {
             auto map = row.toMap();
@@ -1072,9 +1074,9 @@ void Messenger::startDemo()
         rows.append(QVariantMap{{"peer", peer}, {"title", names[i]}, {"preview", texts[i]},
             {"unread", i == 1 ? 2 : 0}, {"avatar", ""}, {"time", "12:40"}});
         m_demoHistory[peer] = {
-            QVariantMap{{"id", "1"}, {"text", "Привет! Это VK для macOS."}, {"outgoing", false}, {"time", "12:38"}, {"sender", names[i]}},
-            QVariantMap{{"id", "2"}, {"text", "Общий интерфейс на Qt Quick, а логика — на C++."}, {"outgoing", true}, {"time", "12:39"}, {"sender", "Вы"}},
-            QVariantMap{{"id", "3"}, {"text", texts[i]}, {"outgoing", false}, {"time", "12:40"}, {"sender", names[i]}}
+            QVariantMap{{"id", "1"}, {"text", "Привет! Это VK для macOS."}, {"outgoing", false}, {"sentAt", QDateTime::currentSecsSinceEpoch() - 120}, {"time", "12:38"}, {"sender", names[i]}},
+            QVariantMap{{"id", "2"}, {"text", "Общий интерфейс на Qt Quick, а логика — на C++."}, {"outgoing", true}, {"sentAt", QDateTime::currentSecsSinceEpoch() - 60}, {"time", "12:39"}, {"sender", "Вы"}},
+            QVariantMap{{"id", "3"}, {"text", texts[i]}, {"outgoing", false}, {"sentAt", QDateTime::currentSecsSinceEpoch()}, {"time", "12:40"}, {"sender", names[i]}}
         };
     }
     m_conversations.replace(rows);
@@ -1366,7 +1368,7 @@ void Messenger::clearHistoryCache()
 {
     if (m_demo || m_account.isEmpty() || m_sending) return;
     m_transfers.pause();
-    ++m_generation; ++m_historyGeneration; m_api.cancel(); m_longPoll.stop(); m_actions.resetAccount(); m_folders.reset();
+    ++m_generation; ++m_historyGeneration; m_api.cancel(); m_longPoll.stop(); m_actions.resetAccount(); m_profileActions.resetAccount(); m_folders.reset();
     m_readPending.clear(); m_operationBusy = false; emit operationChanged();
     m_fetchingConversations = m_fetchingHistory = m_loading = false;
     m_outboxSending = false;

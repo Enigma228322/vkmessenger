@@ -1,4 +1,6 @@
 #include "Messenger.h"
+#include "models/TimelinePresentation.h"
+#include <QClipboard>
 #include "Keychain.h"
 #include "LottieSticker.h"
 #include <QGuiApplication>
@@ -325,9 +327,11 @@ private slots:
         auto button = root->findChild<QObject *>("jumpToEndButton");
         QVERIFY(history); QVERIFY(button);
         QTest::qWait(150);
+        // Programmatic positioning does not emit the user-scroll signal.
+        QVERIFY(QMetaObject::invokeMethod(history, "movementStarted"));
         QVERIFY(QMetaObject::invokeMethod(history, "positionViewAtBeginning"));
         QTRY_VERIFY(button->property("visible").toBool());
-        history->setProperty("contentY", 600);
+        history->setProperty("contentY", history->property("contentY").toReal() + 200);
         QTest::qWait(100);
         auto view = qobject_cast<QQuickItem *>(history);
         QVERIFY(view);
@@ -358,8 +362,214 @@ private slots:
             }
         }
         QVERIFY(found);
+        qobject_cast<QQuickWindow *>(root)->resize(900, 650);
+        QTest::qWait(200);
+        for (auto row : content->childItems()) {
+            if (row->objectName() == "messageRow" && row->property("item").toMap().value("id").toString() == anchor) {
+                QVERIFY2(qAbs(row->y() - history->property("contentY").toReal() - offset) <= 1,
+                    qPrintable(QString("anchor=%1 expected=%2 actual=%3 cached=%4/%5 end=%6").arg(anchor).arg(offset).arg(row->y() - history->property("contentY").toReal()).arg(root->property("geometryAnchor").toString()).arg(root->property("geometryOffset").toReal()).arg(root->property("wasAtEnd").toBool())));
+            }
+        }
         QVERIFY(QMetaObject::invokeMethod(button, "clicked"));
         QTRY_VERIFY(!button->property("visible").toBool());
+    }
+
+    void pinnedPreviewAndFilteredConversationBoundary()
+    {
+        TokenNetwork network;
+        QJsonArray conversations;
+        for (int i = 0; i < 3; ++i) {
+            QJsonObject settings{{"title", i == 2 ? "Обычный чат" : QString("Закреплённый %1").arg(i)}};
+            if (i == 0) settings.insert("pinned_message", QJsonObject{{"conversation_message_id", 1}, {"text", QString("Длинное закреплённое сообщение\n").repeated(150)}});
+            conversations.append(QJsonObject{{"conversation", QJsonObject{{"peer", QJsonObject{{"id", 77 + i}}}, {"sort_id", QJsonObject{{"major_id", i < 2 ? 16 : 0}, {"minor_id", 100 - i}}}, {"unread_count", i == 0 ? 0 : 1}, {"chat_settings", settings}}}, {"message", QJsonArray{}}});
+        }
+        network.responses["messages.getDiff"] = {QJsonDocument(QJsonObject{{"response", QJsonObject{{"server_version", "500"}, {"credentials", QJsonObject{{"server_lp", "lp.test/im"}, {"key", "key"}, {"ts", "100"}}}, {"conversations_info", conversations}}}}).toJson(QJsonDocument::Compact)};
+        Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 3);
+        messenger.selectConversation("77", "Закреплённый чат");
+        QVERIFY(messenger.conversations()->get(0).value("pinned").toBool());
+        QVERIFY(messenger.conversations()->get(1).value("pinned").toBool());
+        QVERIFY(!messenger.conversations()->get(2).value("pinned").toBool());
+        QTRY_COMPARE(window->property("pinnedBoundaryPeer").toString(), QString("79"));
+        const auto visibleDividers = [&] {
+            int count = 0;
+            const auto visit = [&](auto &&self, QQuickItem *item) -> void {
+                if (item->objectName() == "pinnedChatsDivider" && item->isVisible()) ++count;
+                for (auto child : item->childItems()) self(self, child);
+            };
+            visit(visit, window->contentItem()); return count;
+        };
+        QTRY_COMPARE(visibleDividers(), 1);
+        auto bar = window->findChild<QQuickItem *>("pinnedMessageBar"); QVERIFY(bar);
+        auto preview = window->findChild<QQuickItem *>("pinnedMessagePreview"); QVERIFY(preview);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        for (const QSize size : {QSize(1180, 780), QSize(780, 560)}) {
+            window->resize(size); QTest::qWait(100);
+            QVERIFY(bar->isVisible()); QCOMPARE(bar->height(), 56);
+            QVERIFY(history->height() > 150);
+            QVERIFY(!preview->property("text").toString().contains('\n'));
+            QVERIFY(preview->property("truncated").toBool());
+            QVERIFY(preview->width() > 0);
+        }
+        window->setProperty("unreadOnly", true);
+        QTRY_COMPARE(window->property("pinnedBoundaryPeer").toString(), QString("79"));
+        auto rows = messenger.conversations()->rows;
+        auto second = rows[1].toMap(); second.insert("pinned", false); rows[1] = second;
+        messenger.conversations()->reconcile(rows);
+        QTRY_COMPARE(window->property("pinnedBoundaryPeer").toString(), QString());
+        window->setProperty("unreadOnly", false);
+        QTRY_COMPARE(window->property("pinnedBoundaryPeer").toString(), QString("78"));
+        window->setProperty("search", "обычный");
+        QTRY_COMPARE(window->property("pinnedBoundaryPeer").toString(), QString());
+        QTRY_COMPARE(visibleDividers(), 0);
+    }
+
+    void timelineGroupingBoundaries()
+    {
+        const auto row = [](const QString &id, int author, qint64 date, bool outgoing = false) {
+            return QVariantMap{{"id", id}, {"cmid", id}, {"outgoing", outgoing}, {"raw", QVariantMap{{"from_id", QString::number(author)}, {"date", date}}}};
+        };
+        const auto base = QDateTime(QDate(2026, 10, 24), QTime(12, 0)).toSecsSinceEpoch();
+        QVariantList input{row("1", 42, base), row("2", 42, base + 30), row("3", 42, base + 60), row("4", 43, base + 90), row("5", 43, base + 391)};
+        auto output = TimelinePresentation::decorate(input, 2);
+        QVERIFY(output[0].toMap().value("groupStart").toBool());
+        QVERIFY(!output[1].toMap().value("groupStart").toBool());
+        QVERIFY(output[2].toMap().value("groupStart").toBool()); // unread boundary
+        QVERIFY(output[2].toMap().value("unreadStart").toBool());
+        QVERIFY(output[3].toMap().value("groupStart").toBool()); // another author
+        QVERIFY(output[4].toMap().value("groupStart").toBool()); // > five minutes
+        QVERIFY(!output[0].toMap().value("dateLabel").toString().isEmpty());
+        // Removing the first unread row must recompute the following row's boundary.
+        input.removeAt(2);
+        output = TimelinePresentation::decorate(input, 2);
+        QVERIFY(output[2].toMap().value("unreadStart").toBool());
+        auto sticker = row("6", 43, base + 400);
+        sticker.insert("attachments", QVariantList{QVariantMap{{"type", "sticker"}}});
+        output = TimelinePresentation::decorate({sticker, row("7", 43, base + 410)}, 10);
+        QVERIFY(output[1].toMap().value("groupStart").toBool());
+        output = TimelinePresentation::decorate({row("8", 43, base), QVariantMap{{"gap", true}}, row("10", 43, base + 5)}, 10);
+        QVERIFY(output[2].toMap().value("groupStart").toBool());
+        const auto midnight = QDateTime(QDate(2026, 10, 25), QTime(0, 0)).toSecsSinceEpoch();
+        output = TimelinePresentation::decorate({row("11", 42, midnight - 1), row("12", 42, midnight)}, 20);
+        QVERIFY(output[1].toMap().value("groupStart").toBool());
+        QVERIFY(!output[1].toMap().value("dateLabel").toString().isEmpty());
+    }
+
+    void messagePopupCopiesTextAndClosesOnResize()
+    {
+        Messenger messenger;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH)));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.startDemo();
+        auto popup = window->findChild<QObject *>("messageActionPopup"); QVERIFY(popup);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        QVariantMap message{{"id", "1"}, {"text", "Текст + C++ & <tag>"}, {"outgoing", true}};
+        QVERIFY(QMetaObject::invokeMethod(popup, "showAt", Q_ARG(QVariant, QVariant::fromValue(history)), Q_ARG(QVariant, message), Q_ARG(QVariant, QVariant::fromValue(history))));
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QVERIFY(popup->property("x").toReal() >= 0);
+        QVERIFY(popup->property("y").toReal() >= 0);
+        QVERIFY(popup->property("x").toReal() + popup->property("width").toReal() <= window->width());
+        QVERIFY(popup->property("y").toReal() + popup->property("height").toReal() <= window->height());
+        QQuickItem *copy = nullptr;
+        const auto findCopy = [&](auto &&self, QQuickItem *item) -> void {
+            if (item->objectName() == "messageAction_copy") copy = item;
+            for (auto child : item->childItems()) self(self, child);
+        };
+        findCopy(findCopy, window->contentItem()); QVERIFY(copy);
+        QVERIFY(QMetaObject::invokeMethod(copy, "clicked"));
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), message.value("text").toString());
+        QTRY_VERIFY(!popup->property("opened").toBool());
+        QVERIFY(QMetaObject::invokeMethod(popup, "open"));
+        QTRY_VERIFY(popup->property("opened").toBool());
+        window->resize(800, 600);
+        QTRY_VERIFY(!popup->property("opened").toBool());
+    }
+
+    void inlineEditingKeepsDraftOnFailureCancelAndSuccess()
+    {
+        TokenNetwork network;
+        const QByteArray diff = R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":1},"message":[{"id":900,"conversation_message_id":1,"peer_id":77,"from_id":42,"out":1,"date":1792830000,"text":"Исходное сообщение"}]}]}})";
+        network.responses["messages.getDiff"] = {diff, diff};
+        network.responses["messages.getDiffContent"] = {R"({"response":{"items":[{"peer_id":77,"messages":[{"id":900,"conversation_message_id":1,"peer_id":77,"from_id":42,"out":1,"date":1792830000,"text":"Исходное сообщение"}]}]}})"};
+        network.responses["messages.edit"] = {R"({"error":{"error_code":100,"error_msg":"Test edit rejected"}})", R"({"response":1})"};
+        Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto root = engine.rootObjects().first();
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        messenger.selectConversation("77", "Тестовый диалог"); QTRY_COMPARE(messenger.messages()->rowCount(), 1);
+        messenger.setDraftText("77", "Мой черновик");
+        auto composer = root->findChild<QObject *>("composer"); QVERIFY(composer);
+        const auto edit = [&] { return QMetaObject::invokeMethod(root, "messageActions", Q_ARG(QVariant, "edit"), Q_ARG(QVariant, messenger.messages()->get(0))); };
+        QVERIFY(edit());
+        QCOMPARE(root->property("editingMessage").toString(), QString("1"));
+        QCOMPARE(composer->property("text").toString(), QString("Исходное сообщение"));
+        composer->setProperty("text", "Исправленный текст");
+        QCOMPARE(messenger.draftText(), QString("Мой черновик"));
+        QVERIFY(QMetaObject::invokeMethod(root, "cancelEditing"));
+        QCOMPARE(composer->property("text").toString(), QString("Мой черновик"));
+        QVERIFY(edit());
+        composer->setProperty("text", "Исправленный текст");
+        QVERIFY(QMetaObject::invokeMethod(composer, "submit"));
+        QTRY_VERIFY(!messenger.actions()->busy());
+        QVERIFY(!messenger.actions()->error().isEmpty());
+        QCOMPARE(root->property("editingMessage").toString(), QString("1"));
+        QCOMPARE(composer->property("text").toString(), QString("Исправленный текст"));
+        QCOMPARE(messenger.draftText(), QString("Мой черновик"));
+        QVERIFY(QMetaObject::invokeMethod(composer, "submit"));
+        QTRY_COMPARE(root->property("editingMessage").toString(), QString());
+        QCOMPARE(composer->property("text").toString(), QString("Мой черновик"));
+        QCOMPARE(messenger.draftText(), QString("Мой черновик"));
+        QVERIFY(edit());
+        composer->setProperty("text", "Не отправленная правка");
+        QVERIFY(QMetaObject::invokeMethod(root, "selectChat", Q_ARG(QVariant, "88"), Q_ARG(QVariant, "Другой диалог")));
+        QCOMPARE(root->property("editingMessage").toString(), QString());
+        messenger.selectConversation("77", "Тестовый диалог");
+        QCOMPARE(messenger.draftText(), QString("Мой черновик"));
+        int edits = 0;
+        for (const auto &request : network.requests) {
+            QVERIFY(!request.first.path().endsWith("messages.send"));
+            if (request.first.path().endsWith("messages.edit")) ++edits;
+        }
+        QCOMPARE(edits, 2);
+    }
+
+    void profileUsesIndependentResultsAndKeepsDraft()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":2000000077},"chat_settings":{"title":"Тестовая беседа"}},"message":[]}]}})"};
+        network.responses["messages.getConversationMembers"] = {R"({"response":{"count":1,"items":[{"member_id":42}],"profiles":[{"id":42,"first_name":"Тестовый","last_name":"Участник"}]}})"};
+        network.responses["messages.getHistoryAttachments"] = {R"({"response":{"items":[]}})"};
+        Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.loginWithToken("test-token"); QTRY_VERIFY(messenger.connected());
+        messenger.selectConversation("2000000077", "Тестовая беседа");
+        messenger.setDraftText("2000000077", "Несохранённый ввод");
+        auto profile = window->findChild<QObject *>("conversationProfile"); QVERIFY(profile);
+        QVERIFY(QMetaObject::invokeMethod(profile, "present", Q_ARG(QVariant, QVariant::fromValue(window->contentItem()))));
+        QTRY_VERIFY(profile->property("opened").toBool());
+        QTRY_COMPARE(messenger.profileActions()->results().size(), 1);
+        QCOMPARE(messenger.profileActions()->results().first().toMap().value("title").toString(), QString("Тестовый Участник"));
+        if (qEnvironmentVariableIsSet("VKM_PROFILE_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_PROFILE_SCREENSHOT")));
+        messenger.actions()->reset();
+        QCOMPARE(messenger.profileActions()->results().size(), 1);
+        QCOMPARE(messenger.draftText(), QString("Несохранённый ввод"));
+        profile->setProperty("section", 1);
+        QVERIFY(QMetaObject::invokeMethod(profile, "loadSection"));
+        QTRY_VERIFY(!messenger.profileActions()->busy());
+        QCOMPARE(messenger.profileActions()->results().size(), 0);
+        QVERIFY(QMetaObject::invokeMethod(profile, "close"));
+        QTRY_VERIFY(!profile->property("opened").toBool());
+        QCOMPARE(messenger.selectedPeer(), QString("2000000077"));
+        QCOMPARE(messenger.draftText(), QString("Несохранённый ввод"));
     }
 
     void uiMessageGeometry()
@@ -390,7 +600,9 @@ private slots:
             visit(visit, parent);
             return result;
         };
-        for (const QSize size : {QSize(1180, 780), QSize(780, 560)}) {
+        for (const bool flat : {true, false}) {
+        window->setProperty("flatMessages", flat);
+        for (const QSize size : {QSize(1440, 900), QSize(1180, 780), QSize(780, 560)}) {
             window->resize(size);
             QTest::qWait(250);
             const auto bubbles = collect(history, "messageBubble");
@@ -408,6 +620,13 @@ private slots:
                         QVERIFY2(position.y() + footer->height() <= bubble->height() - 8 + 0.5, qPrintable(name));
                     }
                 }
+                for (auto indicator : collect(bubble, "readIndicator")) {
+                    if (!indicator->isVisible()) continue;
+                    const auto timestamp = collect(bubble, "messageTimestamp").first();
+                    const auto statusX = indicator->mapToItem(bubble, QPointF()).x();
+                    const auto timeX = timestamp->mapToItem(bubble, QPointF()).x();
+                    QVERIFY(flat ? statusX < timeX : statusX > timeX);
+                }
                 for (auto text : collect(bubble, "messageText")) {
                     if (!text->isVisible()) continue;
                     const auto position = text->mapToItem(bubble, QPointF());
@@ -421,6 +640,9 @@ private slots:
             }
             QTRY_VERIFY(history->property("atYEnd").toBool());
         }
+        }
+        window->setProperty("flatMessages", true);
+        QTest::qWait(150);
         if (qEnvironmentVariableIsSet("VKM_SCREENSHOT")) {
             QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_SCREENSHOT")));
         }
@@ -466,6 +688,7 @@ private slots:
         QTRY_COMPARE(messenger.actions()->reactionAssets().size(), 3);
         QCOMPARE(messenger.actions()->reactionImage(1), "https://assets.test/override.png");
         QCOMPARE(messenger.actions()->reactionImage(2), "https://assets.test/second.webp");
+        QCOMPARE(messenger.actions()->selectableReactions().size(), 2);
         QTRY_COMPARE(visualItems("reactionChip").size(), 2);
         QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() == 2 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
         QTRY_VERIFY(!messenger.loading());
@@ -478,6 +701,15 @@ private slots:
         QTRY_VERIFY(!messenger.actions()->busy()); QTRY_COMPARE(messenger.actions()->results().size(), 2);
         QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() >= 4 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
         if (qEnvironmentVariableIsSet("VKM_PICKER_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_PICKER_SCREENSHOT")));
+        QVERIFY(QMetaObject::invokeMethod(picker, "close"));
+        auto popup = window->findChild<QObject *>("messageActionPopup"); QVERIFY(popup);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        QVERIFY(QMetaObject::invokeMethod(popup, "showAt", Q_ARG(QVariant, QVariant::fromValue(history)), Q_ARG(QVariant, messenger.messages()->get(0)), Q_ARG(QVariant, QVariant::fromValue(history))));
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_COMPARE(visualItems("quickReaction").size(), 2); // server-hidden ID is not offered
+        QTRY_VERIFY([&] { for (auto button : visualItems("quickReaction")) { const auto image = qvariant_cast<QQuickItem *>(button->property("contentItem")); if (!image || !image->property("ready").toBool()) return false; } return true; }());
+        if (qEnvironmentVariableIsSet("VKM_ACTIONS_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_ACTIONS_SCREENSHOT")));
+
     }
 
     void diffAppliesEditsDeletesAndNewMessages()

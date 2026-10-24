@@ -17,6 +17,7 @@ class ActionController : public QObject {
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY changed)
     Q_PROPERTY(bool cachedResults READ cachedResults NOTIFY changed)
     Q_PROPERTY(QVariantList reactionAssets READ reactionAssets NOTIFY reactionAssetsChanged)
+    Q_PROPERTY(QVariantList selectableReactions READ selectableReactions NOTIFY reactionAssetsChanged)
 public:
     explicit ActionController(Messenger *messenger);
     bool busy() const { return m_busy; }
@@ -26,7 +27,9 @@ public:
     bool hasMore() const { return m_hasMore; }
     bool cachedResults() const { return m_cachedResults; }
     QVariantList reactionAssets() const { return m_reactionAssets; }
+    QVariantList selectableReactions() const { return m_selectableReactions; }
     void resetAccount();
+    void cancelPending();
     void restoreReactionAssets(const QJsonObject &catalog);
     void cacheReactionAssets(const QJsonObject &catalog);
     Q_INVOKABLE QString reactionImage(int reaction) const;
@@ -48,6 +51,7 @@ public:
     Q_INVOKABLE void search(const QString &query, const QString &peer, bool nextPage = false);
     Q_INVOKABLE void searchPeers(const QString &query);
     Q_INVOKABLE void searchPeople(const QString &query);
+    Q_INVOKABLE void copyText(const QString &text);
     Q_INVOKABLE void copyMessageLink(const QString &peer, const QString &cmid);
     Q_INVOKABLE void loadImportant(bool nextPage = false);
     Q_INVOKABLE void loadAttachments(const QString &peer, const QString &type, bool nextPage = false);
@@ -65,6 +69,7 @@ public:
 signals:
     void changed();
     void completed();
+    void messageEdited(const QString &peer, const QString &cmid);
     void mediaRequested(const QUrl &source, const QString &type, const QString &title);
     void reactionAssetsChanged();
 private:
@@ -76,7 +81,7 @@ private:
     bool m_cachedResults = false;
     QString m_error, m_inviteLink;
     QVariantList m_results;
-    QVariantList m_reactionAssets;
+    QVariantList m_reactionAssets, m_selectableReactions;
     bool m_reactionsLoading = false;
     qint64 m_reactionsCachedAt = 0;
     quint64 m_generation = 0;

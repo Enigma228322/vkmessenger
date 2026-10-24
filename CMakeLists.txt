@@ -40,7 +40,7 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/LottieSticker.cpp src/LottieSticker.h)
 qt_add_qml_module(VK
     URI VK VERSION 1.0
-    QML_FILES qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
+    QML_FILES qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VK PRIVATE vkm-platform Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Multimedia opus rlottie::rlottie ZLIB::ZLIB)

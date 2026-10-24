@@ -20,8 +20,10 @@
 
 class ItemModel : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(quint64 revision READ revision NOTIFY revisionChanged)
 public:
     explicit ItemModel(QObject *parent = nullptr) : QAbstractListModel(parent) {}
+    quint64 revision() const { return m_revision; }
     int rowCount(const QModelIndex &parent = {}) const override { return parent.isValid() ? 0 : rows.size(); }
     QVariant data(const QModelIndex &index, int role) const override {
         return index.isValid() && index.row() < rows.size() && role == Qt::UserRole
@@ -31,8 +33,10 @@ public:
     void replace(const QVariantList &value) {
         if (rows == value) return;
         beginResetModel(); rows = value; endResetModel();
+        ++m_revision; emit revisionChanged();
     }
     void reconcile(const QVariantList &value) {
+        if (rows == value) return;
         const auto identity = [](const QVariant &value) { const auto row = value.toMap(); return row.value("identity", row.value("id")); };
         for (int i = 0; i < value.size(); ++i) {
             const auto key = identity(value[i]);
@@ -56,6 +60,7 @@ public:
             beginRemoveRows({}, value.size(), rows.size() - 1);
             rows.remove(value.size(), rows.size() - value.size()); endRemoveRows();
         }
+        ++m_revision; emit revisionChanged();
     }
     Q_INVOKABLE QVariantMap get(int row) const { return row >= 0 && row < rows.size() ? rows[row].toMap() : QVariantMap(); }
     Q_INVOKABLE int find(const QString &id) const {
@@ -66,6 +71,10 @@ public:
         return -1;
     }
     QVariantList rows;
+signals:
+    void revisionChanged();
+private:
+    quint64 m_revision = 0;
 };
 
 class Messenger : public QObject {
@@ -102,6 +111,7 @@ class Messenger : public QObject {
     Q_PROPERTY(QVariantMap pinnedMessage READ pinnedMessage NOTIFY changed)
     Q_PROPERTY(bool canWrite READ canWrite NOTIFY changed)
     Q_PROPERTY(ActionController *actions READ actions CONSTANT)
+    Q_PROPERTY(ActionController *profileActions READ profileActions CONSTANT)
     Q_PROPERTY(FolderController *folders READ folders CONSTANT)
     Q_PROPERTY(MediaCache *media READ media CONSTANT)
     Q_PROPERTY(VoiceRecorder *recorder READ recorder CONSTANT)
@@ -109,6 +119,8 @@ class Messenger : public QObject {
     Q_PROPERTY(bool canManageChat READ canManageChat NOTIFY changed)
     Q_PROPERTY(bool apiInspectorEnabled READ apiInspectorEnabled CONSTANT)
     Q_PROPERTY(bool loginConfigured READ loginConfigured NOTIFY changed)
+    Q_PROPERTY(bool darkTheme READ darkTheme WRITE setDarkTheme NOTIFY changed)
+    Q_PROPERTY(bool flatMessages READ flatMessages WRITE setFlatMessages NOTIFY changed)
     Q_PROPERTY(bool reduceMotion READ reduceMotion WRITE setReduceMotion NOTIFY changed)
     Q_PROPERTY(bool offline READ offline NOTIFY changed)
     Q_PROPERTY(int outgoingCount READ outgoingCount NOTIFY changed)
@@ -134,6 +146,10 @@ public:
     bool offline() const { return m_offline; }
     bool loginConfigured() const { return !m_clientId.isEmpty(); }
     int outgoingCount() const { return m_outgoing.size(); }
+    bool darkTheme() const { return m_settings.value("ui/darkTheme", true).toBool(); }
+    bool flatMessages() const { return m_settings.value("ui/flatMessages", true).toBool(); }
+    void setDarkTheme(bool value) { m_settings.setValue("ui/darkTheme", value); emit changed(); }
+    void setFlatMessages(bool value) { m_settings.setValue("ui/flatMessages", value); emit changed(); }
     bool reduceMotion() const;
     Q_INVOKABLE void refreshPreferences() { emit changed(); }
     Q_INVOKABLE bool openDeepLink(const QUrl &url);
@@ -154,6 +170,7 @@ public:
     QVariantMap reply() const { return m_replyMessage; }
     Transfers *transfers() { return &m_transfers; }
     ActionController *actions() { return &m_actions; }
+    ActionController *profileActions() { return &m_profileActions; }
     FolderController *folders() { return &m_folders; }
     MediaCache *media() { return &m_media; }
     VoiceRecorder *recorder() { return &m_recorder; }
@@ -241,6 +258,7 @@ private:
     QSettings m_settings;
     LocalStore m_store;
     ActionController m_actions;
+    ActionController m_profileActions;
     FolderController m_folders;
     MediaCache m_media;
     VoiceRecorder m_recorder;
