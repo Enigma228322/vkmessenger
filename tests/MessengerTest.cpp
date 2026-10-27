@@ -1,5 +1,6 @@
 #include "Messenger.h"
 #include "models/TimelinePresentation.h"
+#include "platform/DeepLinkHandler.h"
 #include <QClipboard>
 #include "Keychain.h"
 #include "LottieSticker.h"
@@ -135,18 +136,291 @@ private slots:
         auto field = root->findChild<QObject *>("vkIdReturnInput"); QVERIFY(field);
         auto submit = root->findChild<QObject *>("vkIdReturnSubmit"); QVERIFY(submit);
         QTRY_VERIFY(dialog->property("visible").toBool());
+        QVERIFY(!field->property("visible").toBool());
+        auto manual = root->findChild<QObject *>("vkIdManualReturn"); QVERIFY(manual);
+        manual->setProperty("checked", true);
         QVERIFY(field->property("visible").toBool());
         QCOMPARE(field->property("echoMode").toInt(), 2);
         QVERIFY(!submit->property("enabled").toBool());
         field->setProperty("text", "https://153-51-114-47.sslip.io/callback?code=test&state=wrong&device_id=test");
         QVERIFY(submit->property("enabled").toBool());
         QVERIFY(QMetaObject::invokeMethod(submit, "clicked"));
-        QVERIFY(!messenger.authorizing());
-        QVERIFY(!messenger.browserLoginPending());
+        QVERIFY(messenger.authorizing());
+        QVERIFY(messenger.browserLoginPending());
         QVERIFY(!messenger.connected());
         QVERIFY(!messenger.error().isEmpty());
-        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(dialog->property("visible").toBool());
         QCOMPARE(field->property("text").toString(), QString());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+        QVERIFY(!messenger.authorizing()); QVERIFY(!messenger.browserLoginPending());
+    }
+
+    void appCallbackCompletesOnceThroughFileOpenEventAndKeepsHttpsRedirect()
+    {
+        TokenNetwork network; Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        DeepLinkHandler handler(messenger); handler.setWindow(window);
+        QObject receiver; receiver.installEventFilter(&handler);
+        LoginBrowserCapture browser; QDesktopServices::setUrlHandler("https", &browser, "capture");
+        messenger.login(); QDesktopServices::unsetUrlHandler("https");
+        const QUrlQuery authorize(browser.url); const auto state = authorize.queryItemValue("state");
+        QVERIFY(!state.isEmpty());
+        const QUrl callback("vkm://auth/callback?code=fixture%2Bcode%2F%252B%3D%3D&device_id=device%2B%25%26%3D&state=" + state);
+        window->hide(); QVERIFY(!window->isVisible());
+        QFileOpenEvent event(callback); QVERIFY(QCoreApplication::sendEvent(&receiver, &event));
+        QTRY_VERIFY(window->isVisible());
+        QTRY_COMPARE(network.replies["auth"].size(), 1);
+        QVERIFY(messenger.authorizing()); QVERIFY(!messenger.browserLoginPending());
+        auto dialog = window->findChild<QObject *>("vkIdReturnDialog"); QVERIFY(dialog);
+        QVERIFY(dialog->property("visible").toBool()); // progress stays visible
+        const auto request = network.requests.first();
+        QCOMPARE(request.first.toString(), "https://id.vk.ru/oauth2/auth");
+        const QUrlQuery body(QString::fromUtf8(request.second));
+        QCOMPARE(body.queryItemValue("code", QUrl::FullyDecoded), "fixture+code/%2B==");
+        QCOMPARE(body.queryItemValue("device_id", QUrl::FullyDecoded), "device+%&=");
+        QCOMPARE(body.queryItemValue("state"), state);
+        QCOMPARE(body.queryItemValue("redirect_uri", QUrl::FullyDecoded), authorize.queryItemValue("redirect_uri", QUrl::FullyDecoded));
+        QCOMPARE(OAuth::challenge(body.queryItemValue("code_verifier")), authorize.queryItemValue("code_challenge"));
+        QFileOpenEvent duplicate(callback); QVERIFY(QCoreApplication::sendEvent(&receiver, &duplicate));
+        QUrl manual(authorize.queryItemValue("redirect_uri", QUrl::FullyDecoded)); manual.setQuery(callback.query(QUrl::FullyEncoded), QUrl::StrictMode);
+        messenger.completeLogin(manual.toString(QUrl::FullyEncoded));
+        QVERIFY(messenger.authorizing()); QVERIFY(messenger.error().isEmpty());
+        QCOMPARE(network.replies["auth"].size(), 1);
+        network.replies["auth"][0]->deliver(QJsonDocument(QJsonObject{{"access_token", "fixture-token"}, {"refresh_token", "fixture-refresh"}, {"user_id", 42}, {"state", state}}).toJson());
+        QTRY_VERIFY(messenger.connected()); QVERIFY(!messenger.authorizing());
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(messenger.openDeepLink(callback));
+        QVERIFY(messenger.error().isEmpty()); QCOMPARE(network.replies["auth"].size(), 1);
+        QFileOpenEvent unrelated(QUrl("https://unrelated.test/")); QVERIFY(!QCoreApplication::sendEvent(&receiver, &unrelated));
+    }
+
+    void invalidAppCallbacksKeepTheCurrentAttemptAndCanBeRetried()
+    {
+        TokenNetwork network; Messenger messenger(nullptr, &network);
+        LoginBrowserCapture browser; QDesktopServices::setUrlHandler("https", &browser, "capture");
+        messenger.login(); QDesktopServices::unsetUrlHandler("https");
+        const auto state = QUrlQuery(browser.url).queryItemValue("state");
+        const QString tail = "?state=" + state + "&code=fixture&device_id=device";
+        for (const auto &address : QStringList{"vkm://user@auth/callback" + tail, "vkm://auth:443/callback" + tail,
+            "vkm://auth/other" + tail, "vkm://auth/callback" + tail + "#fragment",
+            "vkm://auth/callback" + tail + "&state=other", "vkm://auth/callback" + tail + "&code=other",
+            "vkm://auth/callback" + tail + "&device_id=other", "vkm://auth/callback?state=" + state + "&code=fixture",
+            "vkm://auth/callback?state=wrong&code=fixture&device_id=device"}) {
+            QVERIFY(messenger.openDeepLink(QUrl(address)));
+            QVERIFY(messenger.authorizing()); QVERIFY(messenger.browserLoginPending());
+            QVERIFY(!messenger.error().isEmpty()); QVERIFY(network.requests.isEmpty());
+        }
+        QVERIFY(messenger.openDeepLink(QUrl("vkm://auth/callback" + tail)));
+        QVERIFY(messenger.authorizing()); QVERIFY(!messenger.browserLoginPending());
+        QVERIFY(messenger.error().isEmpty()); QTRY_COMPARE(network.replies["auth"].size(), 1);
+        network.replies["auth"][0]->deliver("#offline");
+        QTRY_VERIFY(!messenger.authorizing()); QVERIFY(!messenger.connected());
+        QVERIFY(messenger.error().contains("не удалось получить токен"));
+        QVERIFY(messenger.openDeepLink(QUrl("vkm://auth/callback" + tail)));
+        QCOMPARE(network.replies["auth"].size(), 1);
+    }
+
+    void cancelledExpiredAndSupersededAppCallbacksCannotSignIn()
+    {
+        TokenNetwork network; Messenger messenger(nullptr, &network);
+        LoginBrowserCapture browser;
+        const auto start = [&] {
+            QDesktopServices::setUrlHandler("https", &browser, "capture"); messenger.login(); QDesktopServices::unsetUrlHandler("https");
+            return QUrl("vkm://auth/callback?state=" + QUrlQuery(browser.url).queryItemValue("state") + "&code=fixture&device_id=device");
+        };
+        const auto old = start(); const auto current = start();
+        QVERIFY(messenger.openDeepLink(old));
+        QVERIFY(messenger.authorizing()); QVERIFY(messenger.browserLoginPending()); QVERIFY(network.requests.isEmpty());
+        auto oauth = messenger.findChild<OAuth *>(); QVERIFY(oauth);
+        QVERIFY(QMetaObject::invokeMethod(oauth, "expire"));
+        QVERIFY(!messenger.authorizing()); QVERIFY(messenger.error().contains("истекло"));
+        QVERIFY(messenger.openDeepLink(current)); QVERIFY(network.requests.isEmpty());
+        QVERIFY(messenger.error().contains("Начните вход заново"));
+        const auto cancelled = start(); messenger.logout();
+        QVERIFY(messenger.openDeepLink(cancelled)); QVERIFY(!messenger.authorizing()); QVERIFY(network.requests.isEmpty());
+        const auto denied = start();
+        QUrl denial(denied); denial.setQuery("state=" + QUrlQuery(denied).queryItemValue("state") + "&error=access_denied");
+        QVERIFY(messenger.openDeepLink(denial));
+        QVERIFY(!messenger.authorizing()); QVERIFY(messenger.error().contains("отклонён")); QVERIFY(network.requests.isEmpty());
+        const auto pending = start(); QVERIFY(messenger.openDeepLink(pending));
+        QTRY_COMPARE(network.replies["auth"].size(), 1);
+        auto stale = network.replies["auth"][0]; messenger.logout();
+        if (stale) stale->deliver(R"({"access_token":"stale-token","user_id":42})");
+        QVERIFY(!messenger.connected()); QVERIFY(!messenger.authorizing()); QVERIFY(savedSession.isEmpty());
+        // A fresh process has neither state nor verifier from the old browser tab.
+        Messenger restarted(nullptr, &network, m_storage.path(), false);
+        QVERIFY(restarted.openDeepLink(pending)); QVERIFY(!restarted.authorizing()); QVERIFY(!restarted.connected());
+        QVERIFY(restarted.error().contains("Начните вход заново"));
+    }
+
+    void profileTypeFailureFallsBackAndReportsMethodAndCode_data()
+    {
+        QTest::addColumn<bool>("publicAllowed");
+        QTest::newRow("web-profile-unavailable-public-allowed") << true;
+        QTest::newRow("public-profile-also-unavailable") << false;
+    }
+    void profileTypeFailureFallsBackAndReportsMethodAndCode()
+    {
+        QFETCH(bool, publicAllowed);
+        // Deliberately synthetic code: classification must not assume an
+        // undocumented mapping between this message and a fixed error number.
+        const QByteArray denied = R"({"error":{"error_code":999001,"error_msg":"Method is not available for this profile type: method is unavailable with current profile type","request_params":[{"key":"access_token","value":"do-not-display"}]}})";
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {denied};
+        network.responses["messages.getConversations"] = {publicAllowed ? QByteArray(R"({"response":{"count":0,"items":[]}})") : denied};
+        Messenger messenger(nullptr, &network); messenger.loginWithToken("fixture-token");
+        QTRY_COMPARE(network.replies["messages.getConversations"].size(), 1);
+        if (publicAllowed) {
+            QTRY_COMPARE(network.replies["messages.getLongPollServer"].size(), 1);
+            QVERIFY(messenger.error().isEmpty());
+        } else {
+            QTRY_VERIFY(messenger.error().contains("типа профиля"));
+            QVERIFY(messenger.error().contains("messages.getConversations")); QVERIFY(messenger.error().contains("999001"));
+            QVERIFY(!messenger.error().contains("fixture-token")); QVERIFY(!messenger.error().contains("do-not-display"));
+            QVERIFY(!messenger.canWrite());
+            messenger.selectConversation("77", "Cached conversation");
+            messenger.reload(); messenger.typing(); QTest::qWait(3200);
+            QCOMPARE(network.replies["messages.getHistory"].size(), 0);
+            QCOMPARE(network.replies["messages.setActivity"].size(), 0);
+            QCOMPARE(network.replies["messages.getLongPollServer"].size(), 0);
+        }
+        QVERIFY(messenger.connected()); QVERIFY(!savedSession.isEmpty());
+        QCOMPARE(network.replies["messages.getDiff"].size(), 1);
+        QCOMPARE(network.replies["messages.getConversations"].size(), 1);
+    }
+
+    void apiDiagnosticsDoNotExposeServerEchoedCredentials()
+    {
+        TokenNetwork network;
+        const QJsonObject error{{"error_code", 100},
+            {"error_msg", "Invalid request: access_token=fixture-secret https://callback.test/?code=fixture-code"},
+            {"request_params", QJsonArray{QJsonObject{{"key", "access_token"}, {"value", "fixture-secret"}}}}};
+        network.responses["messages.getHistory"] = {QJsonDocument(QJsonObject{{"error", error}}).toJson()};
+        VkApiClient api(&network); api.setToken("fixture-secret");
+        ApiResult result; bool done = false;
+        api.request("messages.getHistory", {}, [&](const ApiResult &value) { result = value; done = true; });
+        QTRY_VERIFY(done);
+        QVERIFY(result.error.contains("messages.getHistory")); QVERIFY(result.error.contains("100"));
+        QVERIFY(!result.error.contains("fixture-secret")); QVERIFY(!result.error.contains("fixture-code"));
+        QVERIFY(!result.error.contains("callback.test"));
+        QVERIFY(!result.methodUnavailable());
+    }
+
+    void vkIdCallbackFallsBackToPublicMessagesApi()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"error":{"error_code":3,"error_msg":"Unknow method passed"}})"};
+        const QByteArray conversations = R"({"response":{"count":1,"items":[{"conversation":{"peer":{"id":77},"unread_count":1},"last_message":{"id":9300,"conversation_message_id":3,"peer_id":77,"from_id":77,"text":"Last"}}],"profiles":[{"id":77,"first_name":"Тестовый","last_name":"Собеседник"}]}})";
+        network.responses["messages.getConversations"] = {conversations, conversations};
+        network.responses["messages.getLongPollServer"] = {R"({"response":{"server":"lp.test/im","key":"fixture-key","ts":"100"}})"};
+        const QByteArray history = R"({"response":{"items":[{"id":9300,"conversation_message_id":3,"from_id":77,"text":"Last"},{"id":9200,"conversation_message_id":2,"from_id":77,"text":"Middle"},{"id":9100,"conversation_message_id":1,"from_id":77,"text":"First"}]}})";
+        network.responses["messages.getHistory"] = {history, history, history};
+        network.responses["messages.getByConversationMessageId"] = {R"({"response":{"items":[{"id":9200,"conversation_message_id":2}]}})"};
+        Messenger messenger(nullptr, &network);
+        LoginBrowserCapture browser;
+        QDesktopServices::setUrlHandler("https", &browser, "capture");
+        messenger.login();
+        QDesktopServices::unsetUrlHandler("https");
+        QVERIFY(messenger.browserLoginPending());
+        const QUrlQuery authorize(browser.url);
+        const auto state = authorize.queryItemValue("state");
+        QVERIFY(!state.isEmpty());
+        network.responses["auth"] = {QJsonDocument(QJsonObject{{"access_token", "fixture-vkid-token"}, {"refresh_token", "fixture-refresh"},
+            {"user_id", 42}, {"expires_in", 3600}, {"state", state}}).toJson()};
+        QUrl callback(authorize.queryItemValue("redirect_uri", QUrl::FullyDecoded));
+        QUrlQuery parameters; parameters.addQueryItem("code", "fixture+code/value=="); parameters.addQueryItem("state", state);
+        parameters.addQueryItem("device_id", "fixture-device"); parameters.addQueryItem("type", "code_v2"); callback.setQuery(parameters);
+        messenger.completeLogin(callback.toString());
+        QTRY_VERIFY(messenger.connected()); QVERIFY(!messenger.authorizing());
+        QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        QVERIFY(messenger.error().isEmpty());
+        QCOMPARE(messenger.conversations()->get(0).value("title").toString(), "Тестовый Собеседник");
+        bool exchanged = false;
+        for (const auto &request : network.requests) if (request.first.path() == "/oauth2/auth") {
+            exchanged = true; QCOMPARE(request.first.host(), "id.vk.ru");
+            const QUrlQuery body(QString::fromUtf8(request.second));
+            QCOMPARE(body.queryItemValue("grant_type"), "authorization_code");
+            QCOMPARE(body.queryItemValue("code", QUrl::FullyDecoded), "fixture+code/value==");
+            QCOMPARE(body.queryItemValue("device_id"), "fixture-device");
+            QCOMPARE(body.queryItemValue("state"), state);
+            QCOMPARE(body.queryItemValue("client_id"), authorize.queryItemValue("client_id"));
+            QCOMPARE(OAuth::challenge(body.queryItemValue("code_verifier")), authorize.queryItemValue("code_challenge"));
+            QVERIFY(!body.hasQueryItem("client_secret"));
+        }
+        QVERIFY(exchanged);
+        QCOMPARE(QJsonDocument::fromJson(savedSession).object().value("access_token").toString(), "fixture-vkid-token");
+        messenger.selectConversation("77", "Search");
+        QTRY_COMPARE(messenger.messages()->rowCount(), 3);
+        QCOMPARE(messenger.messages()->get(0).value("text").toString(), "First");
+        QTRY_COMPARE(network.replies["im"].size(), 1);
+        const QUrlQuery poll(network.replies["im"][0]->url());
+        QCOMPARE(poll.queryItemValue("version"), "3"); QCOMPARE(poll.queryItemValue("act"), "a_check");
+        QCOMPARE(poll.queryItemValue("ts"), "100");
+        messenger.openMessage("77", "2");
+        QTRY_COMPARE(network.replies["messages.getByConversationMessageId"].size(), 1);
+        QTRY_VERIFY(!messenger.loading());
+        bool globalAnchor = false;
+        for (const auto &request : network.requests) if (request.first.path().endsWith("messages.getHistory")) {
+            const QUrlQuery body(QString::fromUtf8(request.second));
+            if (body.hasQueryItem("start_message_id")) { QCOMPARE(body.queryItemValue("start_message_id"), "9200"); globalAnchor = true; }
+        }
+        QVERIFY(globalAnchor);
+        network.replies["im"][0]->deliver(R"({"ts":"101","updates":[[4,9400,0,77,1700000000,"New",{}]]})");
+        QTRY_COMPARE(network.replies["messages.getConversations"].size(), 2);
+        QTRY_VERIFY(!messenger.loading());
+        QCOMPARE(network.replies["messages.getDiff"].size(), 1);
+        QCOMPARE(network.replies["messages.getDiffContent"].size(), 0);
+        QVERIFY(messenger.error().isEmpty());
+    }
+
+    void publicConversationPagesArePublishedTogetherAndDiscardedOnLogout()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"error":{"error_code":3,"error_msg":"Unknown method passed"}})"};
+        QJsonArray items;
+        for (int i = 1; i <= 200; ++i) items.append(QJsonObject{{"conversation", QJsonObject{{"peer", QJsonObject{{"id", i}}}}},
+            {"last_message", QJsonObject{{"id", 10000 + i}, {"conversation_message_id", 1}, {"peer_id", i}, {"text", "Fixture"}}}});
+        network.responses["messages.getConversations"] = {QJsonDocument(QJsonObject{{"response", QJsonObject{{"count", 201}, {"items", items}}}}).toJson()};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("fixture-token");
+        QTRY_COMPARE(network.replies["messages.getConversations"].size(), 2);
+        QCOMPARE(messenger.conversations()->rowCount(), 0); // no partial snapshot
+        network.replies["messages.getConversations"][1]->deliver(R"({"response":{"count":201,"items":[{"conversation":{"peer":{"id":201}},"last_message":{"id":10201,"conversation_message_id":1,"peer_id":201,"text":"Last page"}}]}})");
+        QTRY_COMPARE(messenger.conversations()->rowCount(), 201);
+        QStringList offsets;
+        for (const auto &request : network.requests) if (request.first.path().endsWith("messages.getConversations"))
+            offsets.append(QUrlQuery(QString::fromUtf8(request.second)).queryItemValue("offset"));
+        QCOMPARE(offsets, (QStringList{"0", "200"}));
+        messenger.reload();
+        QTRY_COMPARE(network.replies["messages.getConversations"].size(), 3);
+        // Start another two-page snapshot, then switch sessions while it waits.
+        network.replies["messages.getConversations"][2]->deliver(QJsonDocument(QJsonObject{{"response", QJsonObject{{"count", 201}, {"items", items}}}}).toJson());
+        QTRY_COMPARE(network.replies["messages.getConversations"].size(), 4);
+        QCOMPARE(messenger.conversations()->rowCount(), 201);
+        auto stale = network.replies["messages.getConversations"][3];
+        messenger.logout();
+        if (stale) stale->deliver(R"({"response":{"count":201,"items":[]}})");
+        QTest::qWait(100);
+        QVERIFY(!messenger.connected()); QCOMPARE(messenger.conversations()->rowCount(), 0);
+    }
+
+    void unavailableMessagesAccessDoesNotRepeatLoginOrUnknownMethod()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"error":{"error_code":3,"error_msg":"Unknow method passed"}})"};
+        network.responses["messages.getConversations"] = {R"({"error":{"error_code":15,"error_msg":"Access denied"}})"};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("fixture-token");
+        QTRY_VERIFY(messenger.error().contains("недоступно чтение сообщений"));
+        QVERIFY(messenger.connected()); QVERIFY(!messenger.authorizing());
+        QVERIFY(!savedSession.isEmpty());
+        QVERIFY(!messenger.error().contains("Unknow"));
+        QTest::qWait(3200);
+        messenger.reload(); QTest::qWait(250);
+        QCOMPARE(network.replies["messages.getDiff"].size(), 1);
+        QCOMPARE(network.replies["messages.getConversations"].size(), 1);
     }
 
     void manualTokenLoginAndPersistence()
@@ -717,7 +991,7 @@ private slots:
         QPainter painter(&icon); painter.setPen(Qt::NoPen); painter.setBrush(QColor("#ed657b")); painter.drawEllipse(4, 4, 40, 40); painter.end();
         QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(icon.save(&buffer, "PNG"));
         TokenNetwork network;
-        const QByteArray catalog = R"({"response":{"assets":[{"reaction_id":1,"links":{"static":"https://assets.test/base.png"}},{"reaction_id":2,"links":{"static":"https://assets.test/second.webp"}},{"reaction_id":3,"links":{"static":"https://assets.test/third.svg"}},{"reaction_id":4,"links":{"static":"https://assets.test/hidden.png"}}],"override_assets":[{"reaction_id":1,"links":{"static":"https://assets.test/override.png"}}],"reaction_ids":[1,2,3]}})";
+        const QByteArray catalog = "{\"response\":{\"assets\":[{\"reaction_id\":1,\"links\":{\"static\":\"https://assets.test/base.png\"}},{\"reaction_id\":2,\"links\":{\"static\":\"https://assets.test/second.webp\"}},{\"reaction_id\":3,\"links\":{\"static\":\"https://assets.test/third.svg\"}},{\"reaction_id\":4,\"links\":{\"static\":\"https://assets.test/hidden.png\"}}],\"override_assets\":[{\"reaction_id\":1,\"links\":{\"static\":\"https://assets.test/override.png\"}}],\"reaction_ids\":[1,2,3]}}";
         network.responses["messages.getReactionsAssets"] = {catalog, catalog, catalog};
         network.responses["override.png"] = {png}; network.responses["second.webp"] = {webp};
         network.responses["third.svg"] = {svg};

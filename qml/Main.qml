@@ -1325,13 +1325,28 @@ ApplicationWindow {
         padding: 24
         standardButtons: Dialog.Cancel
         onRejected: messenger.logout()
-        onClosed: loginReturnUrl.clear()
+        onClosed: { loginReturnUrl.clear(); manualLoginReturn.checked = false }
         background: Rectangle { color: window.surface; radius: 16; border.color: design.divider }
         contentItem: ColumnLayout {
             spacing: 12
             Label {
                 Layout.fillWidth: true
-                text: "Завершите вход в браузере. После перехода на " + messenger.redirectUri + " скопируйте полный адрес из адресной строки и вставьте его сюда."
+                text: messenger.browserLoginPending
+                    ? "Подтвердите вход в браузере. На странице возврата разрешите открыть VK или нажмите «Вернуться в приложение»."
+                    : "Получен ответ браузера. Проверяем вход VK ID…"
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+            }
+            CheckBox {
+                id: manualLoginReturn
+                objectName: "vkIdManualReturn"
+                text: "Вставить ссылку вручную"
+                visible: messenger.browserLoginPending
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: manualLoginReturn.checked && messenger.browserLoginPending
+                text: "Если браузер не вернулся в приложение, вставьте полный адрес страницы " + messenger.redirectUri + "."
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
             }
@@ -1339,6 +1354,7 @@ ApplicationWindow {
                 id: loginReturnUrl
                 objectName: "vkIdReturnInput"
                 Layout.fillWidth: true
+                visible: manualLoginReturn.checked && messenger.browserLoginPending
                 placeholderText: "Адрес страницы после входа"
                 echoMode: TextInput.Password
                 enabled: messenger.browserLoginPending
@@ -1347,10 +1363,20 @@ ApplicationWindow {
             ActionButton {
                 objectName: "vkIdReturnSubmit"
                 Layout.fillWidth: true
+                visible: manualLoginReturn.checked && messenger.browserLoginPending
                 text: messenger.browserLoginPending ? "Завершить вход" : "Проверяем вход…"
                 primary: true
                 enabled: messenger.browserLoginPending && loginReturnUrl.text.trim().length > 0
                 onClicked: { messenger.completeLogin(loginReturnUrl.text); loginReturnUrl.clear() }
+            }
+            BusyIndicator { Layout.alignment: Qt.AlignHCenter; visible: messenger.authorizing && !messenger.browserLoginPending; running: visible }
+            Label {
+                Layout.fillWidth: true
+                visible: messenger.error.length > 0
+                text: messenger.error
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: "#b3432a"
             }
         }
     }

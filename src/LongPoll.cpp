@@ -28,21 +28,22 @@ void LongPoll::stop()
     m_key.clear(); m_ts.clear(); m_server = QUrl();
 }
 
-void LongPoll::start(const QJsonObject &credentials)
+void LongPoll::start(const QJsonObject &credentials, int version)
 {
     stop();
-    auto address = credentials.value("server_lp").toString();
+    m_version = version;
+    auto address = credentials.value(version == 3 ? "server" : "server_lp").toString();
     if (!address.contains("://")) address.prepend("https://");
     m_server = QUrl(address);
     m_key = credentials.value("key").toString();
     m_ts = cursor(credentials.value("ts"));
     if (m_server.scheme() != "https" || m_server.host().isEmpty() || m_server.hasFragment()
         || !m_server.userInfo().isEmpty() || m_key.isEmpty() || m_ts.isEmpty()) {
-        emit fatalError("getDiff вернул некорректные credentials Long Poll.");
+        emit fatalError("VK вернул некорректные параметры Long Poll.");
         return;
     }
     m_running = true;
-    emit statusChanged("Long Poll v21 · подключено");
+    emit statusChanged(QString("Long Poll v%1 · подключено").arg(m_version));
     poll();
 }
 
@@ -52,7 +53,7 @@ void LongPoll::recover(const QString &reason)
     const auto generation = m_generation;
     const auto delay = qMin(30000, 500 * (1 << qMin(m_failures++, 6)))
         + QRandomGenerator::global()->bounded(200);
-    emit statusChanged(reason + " · восстановление через getDiff…");
+    emit statusChanged(reason + " · восстановление соединения…");
     m_retry.disconnect(this);
     connect(&m_retry, &QTimer::timeout, this, [this, generation] {
         if (generation == m_generation) emit resyncRequired();
@@ -66,13 +67,18 @@ void LongPoll::poll()
     auto url = m_server;
     QUrlQuery query(url);
     query.removeAllQueryItems("version"); query.removeAllQueryItems("mode");
-    query.addQueryItem("version", "21"); query.addQueryItem("mode", "682");
+    query.addQueryItem("version", QString::number(m_version)); query.addQueryItem("mode", m_version == 3 ? "170" : "682");
+    if (m_version == 3) {
+        query.addQueryItem("act", "a_check"); query.addQueryItem("key", m_key);
+        query.addQueryItem("ts", m_ts); query.addQueryItem("wait", "25");
+    }
     url.setQuery(query);
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
     request.setTransferTimeout(35000);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
-    auto reply = m_network->post(request, formBody({{"act", "a_check"}, {"key", m_key}, {"ts", m_ts}, {"wait", "25"}}));
+    auto reply = m_version == 3 ? m_network->get(request)
+        : m_network->post(request, formBody({{"act", "a_check"}, {"key", m_key}, {"ts", m_ts}, {"wait", "25"}}));
     m_reply = reply;
     const auto generation = m_generation;
     connect(reply, &QNetworkReply::finished, this, [this, reply, generation] {
@@ -90,7 +96,7 @@ void LongPoll::poll()
         if (object.contains("failed")) {
             if (object.value("failed").toInt() == 4) {
                 stop();
-                emit fatalError("Сервер не поддерживает Long Poll v21.");
+                emit fatalError(QString("Сервер не поддерживает Long Poll v%1.").arg(m_version));
             } else recover("Long Poll: сессия требует синхронизации");
             return;
         }
@@ -102,7 +108,7 @@ void LongPoll::poll()
         m_failures = 0;
         emit batch(object);
         if (!m_running || generation != m_generation) return;
-        emit statusChanged("Long Poll v21 · подключено");
+        emit statusChanged(QString("Long Poll v%1 · подключено").arg(m_version));
         QTimer::singleShot(0, this, [this, generation] { if (generation == m_generation) poll(); });
     });
 }

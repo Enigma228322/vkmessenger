@@ -156,10 +156,13 @@ void LocalStore::loadAccount(const QString &account, Result result)
     }, std::move(result));
 }
 
-void LocalStore::commitDiff(const QString &account, const QList<QJsonObject> &pages, const QString &version, bool full, Result result)
+void LocalStore::commitDiff(const QString &account, const QList<QJsonObject> &pages, const QString &version, bool full, Result result, bool replaceConversations)
 {
-    run([account, pages, version, full](StoreWorker &w) {
+    run([account, pages, version, full, replaceConversations](StoreWorker &w) {
         w.transaction(w.cache, [&] {
+            // A public API conversation snapshot has no diff cursor and must
+            // replace the list without deleting cached history or catalogs.
+            if (replaceConversations) w.query(w.cache, "DELETE FROM entities WHERE account=? AND kind='conversation'", {account});
             if (full) {
                 if (w.fullTextSearch) w.query(w.cache, "DELETE FROM message_search WHERE account=?", {account});
                 w.query(w.cache, "DELETE FROM entities WHERE account=? AND kind!='catalog'", {account});

@@ -57,7 +57,7 @@ static QString mediaDirectory(const QString &overridePath)
 Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QString &storagePath, bool persistentSession)
     : QObject(parent), m_store(storageDirectory(storagePath)), m_actions(this), m_profileActions(this), m_folders(this),
       m_media(mediaDirectory(storagePath), nullptr, network),
-      m_oauth(this), m_longPoll(this, network),
+      m_oauth(this, network), m_longPoll(this, network),
       m_transfers([this](const QString &method, Form parameters, Transfers::Result callback) {
           api(method, parameters, callback);
       }, this, network), m_api(network)
@@ -142,6 +142,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
         m_authorizing = false;
         fail(error);
     });
+    connect(&m_oauth, &OAuth::callbackRejected, this, &Messenger::fail);
     connect(&m_oauth, &OAuth::authenticated, this, &Messenger::acceptSession);
     QTimer::singleShot(0, this, [this] {
         if (!m_persistentSession || m_connected || m_authorizing) return;
@@ -186,6 +187,14 @@ void Messenger::login()
     emit changed();
 }
 
+void Messenger::completeLogin(const QString &callback)
+{
+    if (m_oauth.complete(callback) && m_authorizing) {
+        m_error.clear(); m_status = "Проверяем вход VK ID…";
+    }
+    emit changed();
+}
+
 void Messenger::acceptSession(QJsonObject session)
 {
     if (session.value("refresh_token").toString().isEmpty())
@@ -195,6 +204,8 @@ void Messenger::acceptSession(QJsonObject session)
     m_connected = true;
     m_offline = false;
     m_syncBlocked = false;
+    m_messagesAccessError.clear();
+    m_publicMessages = false;
     m_demo = false;
     m_authorizing = false;
     m_error.clear();
@@ -279,7 +290,8 @@ void Messenger::logout()
     m_fetchingHistory = m_fetchingConversations = false;
     m_conversationsDirty = m_historyDirty = false;
     m_activity.clear(); m_online.clear(); m_outRead.clear(); m_unreadCount = 0;
-    m_presenceRevision.clear(); m_eventRevision = 0; m_syncBlocked = false;
+    m_presenceRevision.clear(); m_eventRevision = 0; m_syncBlocked = false; m_publicMessages = false;
+    m_messagesAccessError.clear();
     m_rawConversations.clear(); m_peers.clear(); m_histories.clear(); m_localIdentities.clear();
     m_lastCmid.clear(); m_inRead.clear(); m_readPending.clear(); m_older.clear(); m_newer.clear();
     m_contentDirty.clear(); m_contentRevision.clear();
@@ -299,13 +311,34 @@ void Messenger::logout()
 
 void Messenger::api(const QString &method, Form parameters, Callback callback)
 {
-    m_api.setToken(m_token);
     const auto generation = m_generation;
+    if (m_syncBlocked && method.startsWith("messages.")) {
+        const auto error = m_messagesAccessError;
+        QTimer::singleShot(0, this, [this, generation, callback = std::move(callback), error] {
+            if (generation == m_generation) callback({}, error);
+        });
+        return;
+    }
+    m_api.setToken(m_token);
     m_api.request(method, std::move(parameters), [this, generation, method, callback = std::move(callback)](const ApiResult &result) {
         if (generation != m_generation) return;
         if (result.code == 5) { logout(); fail(result.error); return; }
-        if ((result.code == 7 || result.code == 15 || result.code == 27) && method == "messages.getDiff") {
-            m_longPoll.stop(); m_syncBlocked = true; fail(result.error);
+        if (result.methodUnavailable() && method == "messages.getDiff") {
+            // getDiff is a web-client contract, not part of the public API.
+            // Probe the documented Messages API before declaring access denied.
+            m_publicMessages = true;
+        }
+        if (result.methodUnavailable() && method == "messages.getConversations") {
+            m_longPoll.stop(); m_syncBlocked = true;
+            m_sync.stop(); m_transfers.pause();
+            m_conversationsDirty = m_historyDirty = false;
+            const auto reason = result.profileTypeUnavailable
+                ? QString("VK не разрешает чтение сообщений для текущего типа профиля. Требуется совместимый профиль и доступ к Messages API.")
+                : QString("Нужен доступ приложения и токена к Messages API.");
+            const auto error = QString("Вход в VK выполнен, но приложению %1 недоступно чтение сообщений. %2 (%3)")
+                .arg(m_session.value("client_id").toString(m_clientId), reason, result.diagnostic());
+            m_messagesAccessError = error;
+            callback({}, error); return;
         }
         if (result.networkFailure) { m_offline = true; emit changed(); }
         callback(result.value, result.error);
@@ -320,6 +353,7 @@ void Messenger::reload()
 
 void Messenger::scheduleSync(bool conversations, bool history)
 {
+    if (m_syncBlocked) return;
     m_conversationsDirty |= conversations;
     m_historyDirty |= history && !m_peer.isEmpty();
     if (!m_sync.isActive()) m_sync.start(120);
@@ -428,6 +462,7 @@ void Messenger::fetchConversations()
     transaction->full = m_version.isEmpty();
     transaction->credentials = m_needCredentials;
     m_needCredentials = false;
+    if (m_publicMessages) { fetchPublicConversations(transaction); return; }
     fetchDiffPage(transaction);
 }
 
@@ -446,6 +481,9 @@ void Messenger::fetchDiffPage(const std::shared_ptr<DiffTransaction> &transactio
     }
     api("messages.getDiff", params, [this, transaction](const QJsonValue &value, const QString &error) {
         if (transaction->generation != m_generation) return;
+        if (!error.isEmpty() && m_publicMessages) {
+            transaction->pages.clear(); fetchPublicConversations(transaction); return;
+        }
         const auto response = value.toObject();
         const auto version = LongPoll::cursor(response.value("server_version"));
         if (!error.isEmpty() || (transaction->pages.isEmpty() && version.isEmpty())) {
@@ -524,6 +562,62 @@ void Messenger::fetchDiffPage(const std::shared_ptr<DiffTransaction> &transactio
             pumpOutbox();
             emit changed();
         });
+    });
+}
+
+void Messenger::fetchPublicConversations(const std::shared_ptr<DiffTransaction> &transaction, int offset)
+{
+    api("messages.getConversations", {{"count", "200"}, {"offset", QString::number(offset)}, {"filter", "all"},
+        {"extended", "1"}, {"fields", "photo_100,online"}, {"group_id", groupId()}},
+        [this, transaction, offset](const QJsonValue &value, const QString &error) {
+        if (transaction->generation != m_generation) return;
+        const auto response = value.toObject();
+        if (!error.isEmpty() || !response.value("items").isArray()) {
+            m_fetchingConversations = false; m_needCredentials |= transaction->credentials;
+            fail(error.isEmpty() ? "VK не вернул список переписок." : error);
+            if (!m_syncBlocked) { m_conversationsDirty = true; m_sync.start(3000); }
+            return;
+        }
+        QJsonArray conversations;
+        const auto items = response.value("items").toArray();
+        for (const auto &value : items) {
+            const auto item = value.toObject(); auto conversation = item.value("conversation").toObject();
+            const auto last = item.value("last_message").toObject();
+            if (!conversation.contains("last_conversation_message_id"))
+                conversation.insert("last_conversation_message_id", last.value("conversation_message_id"));
+            conversations.append(QJsonObject{{"conversation", conversation}, {"message", last.isEmpty() ? QJsonArray() : QJsonArray{last}}});
+        }
+        QJsonObject page{{"conversations_info", conversations}, {"profiles", response.value("profiles")}, {"groups", response.value("groups")}};
+        if (offset == 0) page.insert("counters", QJsonObject{{"messages", response.value("unread_count").toInt()}});
+        transaction->pages.append(page);
+        if (items.size() == 200 && offset + items.size() < response.value("count").toInt()) {
+            if (offset >= 2000000) { m_fetchingConversations = false; fail("Слишком большой список переписок."); return; }
+            fetchPublicConversations(transaction, offset + items.size()); return;
+        }
+        // Public snapshots have no server_version. Never manufacture a diff
+        // cursor, and preserve existing histories when replacing the list.
+        for (const auto &page : transaction->pages) for (const auto &value : page.value("conversations_info").toArray())
+            ++m_contentRevision[id(value.toObject().value("conversation").toObject().value("peer").toObject().value("id"))];
+        m_store.commitDiff(m_account, transaction->pages, {}, false,
+            [this, transaction](const QJsonObject &, const QString &error) {
+            if (transaction->generation != m_generation) return;
+            m_fetchingConversations = false;
+            if (!error.isEmpty()) { fail("Не удалось сохранить переписки: " + error); return; }
+            m_rawConversations.clear(); m_version.clear();
+            transaction->full = false; applyDiff(*transaction);
+            const bool recovered = m_offline; m_offline = false;
+            if (recovered) m_transfers.resume();
+            m_error.clear(); m_status = "VK · сообщения подключены";
+            if (transaction->credentials) {
+                api("messages.getLongPollServer", {{"lp_version", "3"}, {"group_id", groupId()}},
+                    [this](const QJsonValue &value, const QString &error) {
+                    if (!error.isEmpty()) { m_needCredentials = true; fail(error); return; }
+                    m_longPoll.start(value.toObject(), 3);
+                });
+            }
+            if (m_conversationsDirty || m_historyDirty) m_sync.start(120);
+            pumpOutbox(); emit changed();
+        }, true);
     });
 }
 
@@ -733,9 +827,7 @@ void Messenger::fetchHistory(bool older, bool latest, qint64 anchor, bool keepWi
     for (auto cmid : dirty) updated.append(cmid);
     if (!updated.isEmpty()) contentRequest.insert("updated_cmids", updated);
     requests.append(contentRequest);
-    api("messages.getDiffContent", {{"conversation_messages", QString::fromUtf8(QJsonDocument(requests).toJson(QJsonDocument::Compact))},
-        {"extended", "1"}, {"nested_limit", "2"}, {"group_id", groupId()}},
-        [this, generation, peer, older, latest, revision, dirty, anchor, replaceWindow, keepWindow](const QJsonValue &value, const QString &error) {
+    auto received = [this, generation, peer, older, latest, revision, dirty, anchor, replaceWindow, keepWindow](const QJsonValue &value, const QString &error) {
         if (generation != m_historyGeneration) return;
         m_fetchingHistory = false;
         m_loading = false;
@@ -808,6 +900,46 @@ void Messenger::fetchHistory(bool older, bool latest, qint64 anchor, bool keepWi
         if (anchor >= 0) emit scrollToMessage(QString::number(anchor));
         if (m_historyDirty && !m_sync.isActive()) m_sync.start(120);
         emit changed();
+    };
+    if (m_publicMessages) {
+        fetchPublicHistory(peer, anchor >= 0 ? anchor : older && !cache.isEmpty() ? cache.firstKey() : -1,
+            anchor >= 0 ? -25 : older ? 1 : 0, std::move(received));
+    } else {
+        api("messages.getDiffContent", {{"conversation_messages", QString::fromUtf8(QJsonDocument(requests).toJson(QJsonDocument::Compact))},
+            {"extended", "1"}, {"nested_limit", "2"}, {"group_id", groupId()}}, std::move(received));
+    }
+}
+
+void Messenger::fetchPublicHistory(const QString &peer, qint64 cmid, int offset, Callback callback)
+{
+    const auto generation = m_generation, historyGeneration = m_historyGeneration;
+    auto load = [this, peer, offset, generation, historyGeneration, callback](const QString &messageId) {
+        if (generation != m_generation || historyGeneration != m_historyGeneration) return;
+        Form params{{"peer_id", peer}, {"count", "50"}, {"extended", "1"}, {"fields", "photo_100"}, {"group_id", groupId()}};
+        if (!messageId.isEmpty()) { params.append({"start_message_id", messageId}); params.append({"offset", QString::number(offset)}); }
+        api("messages.getHistory", params, [peer, callback](const QJsonValue &value, const QString &error) {
+            if (!error.isEmpty()) { callback({}, error); return; }
+            auto response = value.toObject();
+            if (!response.value("items").isArray()) { callback({}, "VK не вернул историю переписки."); return; }
+            auto messages = response.value("items").toArray();
+            for (int i = 0; i < messages.size(); ++i) {
+                auto message = messages[i].toObject(); message.insert("peer_id", peer.toLongLong()); messages[i] = message;
+            }
+            response.insert("items", QJsonArray{QJsonObject{{"peer_id", peer.toLongLong()}, {"messages", messages}}});
+            callback(response, {});
+        });
+    };
+    if (cmid < 0) { load({}); return; }
+    api("messages.getByConversationMessageId", {{"peer_id", peer}, {"conversation_message_ids", QString::number(cmid)}, {"group_id", groupId()}},
+        [load, callback, cmid](const QJsonValue &value, const QString &error) {
+        if (!error.isEmpty()) { callback({}, error); return; }
+        for (const auto &value : value.toObject().value("items").toArray()) {
+            const auto message = value.toObject();
+            if (message.value("conversation_message_id").toInteger() == cmid && message.value("id").toInteger() > 0) {
+                load(id(message.value("id"))); return;
+            }
+        }
+        callback({}, "Сообщение больше недоступно. Обновите переписку.");
     });
 }
 
@@ -1394,6 +1526,13 @@ bool Messenger::reduceMotion() const
 
 bool Messenger::openDeepLink(const QUrl &url)
 {
+    if (url.scheme() == "vkm" && url.host() == "auth") {
+        if (m_oauth.completeAppCallback(url) && m_authorizing) {
+            m_error.clear(); m_status = "Проверяем вход VK ID…";
+        }
+        emit changed();
+        return true;
+    }
     if (url.scheme() != "vkm" || url.host() != "chat") return false;
     bool valid = false;
     const auto peer = url.path().mid(1).toLongLong(&valid);

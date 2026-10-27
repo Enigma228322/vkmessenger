@@ -63,6 +63,39 @@ private slots:
         QTRY_VERIFY(done);
     }
 
+    void publicSnapshotReplacesOnlyConversationsAndClearsDiffCursor()
+    {
+        QTemporaryDir directory;
+        {
+            LocalStore store(directory.path());
+            const auto page = QJsonDocument::fromJson(R"({"conversations_info":[{"conversation":{"peer":{"id":77}},"message":[{"peer_id":77,"conversation_message_id":1,"text":"Cached"}]}]})").object();
+            store.commitDiff("user:1", {page}, "old-diff-cursor", true, {});
+            store.commitDiff("user:2", {page}, "other-cursor", true, {});
+            store.saveCatalog("user:1", "reactions", {{"assets", QJsonArray{2}}});
+            const auto snapshot = QJsonDocument::fromJson(R"({"conversations_info":[{"conversation":{"peer":{"id":88}},"message":[]}]})").object();
+            bool done = false;
+            store.commitDiff("user:1", {snapshot}, {}, false, [&](auto, const auto &error) { QVERIFY(error.isEmpty()); done = true; }, true);
+            QTRY_VERIFY(done);
+        }
+        LocalStore store(directory.path()); bool done = false;
+        store.loadAccount("user:1", [&](const auto &value, const auto &error) {
+            QVERIFY(error.isEmpty()); QVERIFY(value.value("version").toString().isEmpty());
+            const auto conversations = value.value("conversations").toObject();
+            QCOMPARE(conversations.size(), 1); QVERIFY(conversations.contains("88"));
+            QVERIFY(value.value("catalogs").toObject().contains("reactions")); done = true;
+        });
+        QTRY_VERIFY(done); done = false;
+        store.loadHistory("user:1", "77", [&](const auto &value, const auto &error) {
+            QVERIFY(error.isEmpty()); QCOMPARE(value.value("messages").toArray().size(), 1); done = true;
+        });
+        QTRY_VERIFY(done); done = false;
+        store.loadAccount("user:2", [&](const auto &value, const auto &error) {
+            QVERIFY(error.isEmpty()); QCOMPARE(value.value("version").toString(), "other-cursor");
+            QVERIFY(value.value("conversations").toObject().contains("77")); done = true;
+        });
+        QTRY_VERIFY(done);
+    }
+
     void deletionDirtyFlagsAndAccountIsolation()
     {
         QTemporaryDir directory;

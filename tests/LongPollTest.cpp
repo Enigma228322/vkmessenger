@@ -63,6 +63,23 @@ private slots:
         QVERIFY(!network.requests[0].query().contains("test-key"));
         poll.stop(); QTest::qWait(30); QCOMPARE(events.count(), 2);
     }
+    void publicV3UsesGetAndAdvancesCursor() {
+        Network network;
+        network.responses = {json({{"ts", "101"}, {"updates", QJsonArray{QJsonArray{4, 900, 0, 77}}}})};
+        LongPoll poll(nullptr, &network); QSignalSpy events(&poll, &LongPoll::batch);
+        poll.start({{"server", "lp.test/im"}, {"key", "test-key"}, {"ts", "100"}}, 3);
+        QTRY_COMPARE(network.requests.size(), 2); QCOMPARE(events.count(), 1);
+        QCOMPARE(network.operations[0], QNetworkAccessManager::GetOperation);
+        QCOMPARE(QUrlQuery(network.requests[0]).queryItemValue("version"), "3");
+        QCOMPARE(QUrlQuery(network.requests[0]).queryItemValue("mode"), "170");
+        QCOMPARE(QUrlQuery(network.requests[0]).queryItemValue("key"), "test-key");
+        QCOMPARE(QUrlQuery(network.requests[1]).queryItemValue("ts"), "101");
+        QVERIFY(network.bodies[0].isEmpty());
+        poll.stop();
+        poll.start(credentials("200"));
+        QCOMPARE(network.operations.last(), QNetworkAccessManager::PostOperation);
+        QCOMPARE(QUrlQuery(network.requests.last()).queryItemValue("version"), "21");
+    }
     void failuresRequestDiff_data() {
         QTest::addColumn<int>("failure");
         QTest::newRow("expired-ts") << 1; QTest::newRow("expired-key") << 2; QTest::newRow("lost-session") << 3;

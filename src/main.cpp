@@ -3,7 +3,7 @@
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QQmlContext>
-#include <QFileOpenEvent>
+#include "platform/DeepLinkHandler.h"
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include "media/OggOpusWriter.h"
@@ -16,18 +16,6 @@
 #include <QStandardPaths>
 #include <QSettings>
 #include <QDir>
-
-class DeepLinkHandler : public QObject {
-public:
-    explicit DeepLinkHandler(Messenger &messenger) : m_messenger(messenger) {}
-protected:
-    bool eventFilter(QObject *, QEvent *event) override {
-        if (event->type() != QEvent::FileOpen) return false;
-        return m_messenger.openDeepLink(static_cast<QFileOpenEvent *>(event)->url());
-    }
-private:
-    Messenger &m_messenger;
-};
 
 int main(int argc, char *argv[])
 {
@@ -66,6 +54,7 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
                      &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("VK", "Main");
+    if (!engine.rootObjects().isEmpty()) deepLinks.setWindow(qobject_cast<QWindow *>(engine.rootObjects().first()));
     bool tokenEntryAvailable = false;
     if (selfCheck && !engine.rootObjects().isEmpty()) {
         auto field = engine.rootObjects().first()->findChild<QObject *>("accessTokenInput");

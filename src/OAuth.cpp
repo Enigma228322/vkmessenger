@@ -6,14 +6,12 @@
 #include <QNetworkReply>
 #include <QRandomGenerator>
 #include <QTcpSocket>
+#include <algorithm>
 
-OAuth::OAuth(QObject *parent) : QObject(parent)
+OAuth::OAuth(QObject *parent, QNetworkAccessManager *network) : QObject(parent), m_network(network ? network : &m_defaultNetwork)
 {
     m_timeout.setSingleShot(true);
-    connect(&m_timeout, &QTimer::timeout, this, [this] {
-        cancel();
-        emit failed(QStringLiteral("Время входа истекло. Попробуйте ещё раз."));
-    });
+    connect(&m_timeout, &QTimer::timeout, this, &OAuth::expire);
     connect(&m_server, &QTcpServer::newConnection, this, [this] {
         while (m_server.hasPendingConnections()) {
             auto socket = m_server.nextPendingConnection();
@@ -70,13 +68,32 @@ bool OAuth::sameRedirect(const QUrl &actual, const QUrl &expected)
         && actual.path() == expected.path() && actual.userInfo().isEmpty() && !actual.hasFragment();
 }
 
+bool OAuth::isAppCallback(const QUrl &url)
+{
+    return url.isValid() && url.scheme() == "vkm" && url.authority() == "auth"
+        && url.path() == "/callback" && !url.hasFragment();
+}
+
+void OAuth::expire()
+{
+    if (!awaitingCallback()) return;
+    cancel();
+    emit failed(QStringLiteral("Время входа истекло. Начните вход заново."));
+}
+
 void OAuth::cancel()
 {
     ++m_generation;
     m_state.clear();
     m_verifier.clear();
+    m_consumedState.clear();
+    m_exchanging = false;
     m_timeout.stop();
     m_server.close();
+    if (m_reply) {
+        auto reply = m_reply.data(); m_reply.clear();
+        reply->disconnect(this); reply->abort(); reply->deleteLater();
+    }
 }
 
 void OAuth::start(const QString &clientId, const QString &redirect, const QString &scope)
@@ -114,41 +131,83 @@ void OAuth::start(const QString &clientId, const QString &redirect, const QStrin
     if (!scope.isEmpty()) query.addQueryItem("scope", scope);
     url.setQuery(query);
     m_timeout.start(300000);
+    m_deadline.setRemainingTime(300000);
     if (!QDesktopServices::openUrl(url)) {
         cancel();
         emit failed(QStringLiteral("Не удалось открыть браузер."));
     }
 }
 
-void OAuth::complete(const QString &callback)
+bool OAuth::completeAppCallback(const QUrl &callback)
 {
-    const QUrl url(callback.trimmed());
+    if (!isAppCallback(callback)) {
+        emit callbackRejected(QStringLiteral("Некорректный адрес возврата в приложение."));
+        return false;
+    }
+    if (!awaitingCallback() && !m_exchanging && m_consumedState.isEmpty()) {
+        emit callbackRejected(QStringLiteral("Нет ожидающего входа. Начните вход заново в этом приложении."));
+        return false;
+    }
+    QUrl original(m_redirect);
+    if (original.scheme() != "https") {
+        emit callbackRejected(QStringLiteral("Этот способ возврата предназначен для HTTPS-входа."));
+        return false;
+    }
+    // Preserve the encoded query. The registered HTTPS redirect, not the
+    // transport scheme, must still be sent to VK during the token exchange.
+    original.setQuery(callback.query(QUrl::FullyEncoded), QUrl::StrictMode);
+    return complete(original.toString(QUrl::FullyEncoded));
+}
+
+bool OAuth::complete(const QString &callback)
+{
+    const QUrl url(callback.trimmed(), QUrl::StrictMode);
     const QUrlQuery query(url);
+    if (awaitingCallback() && m_deadline.hasExpired()) { expire(); return false; }
+    // A browser may deliver the same URL more than once. Never turn a duplicate
+    // into a terminal login failure while the token request is in flight.
+    if (sameRedirect(url, QUrl(m_redirect)) && (m_exchanging || (!m_consumedState.isEmpty()
+        && query.queryItemValue("state") == m_consumedState))) return false;
     if (m_state.isEmpty() || !sameRedirect(url, QUrl(m_redirect))
         || query.queryItemValue("state") != m_state) {
-        emit failed(QStringLiteral("Ссылка не соответствует текущему входу (redirect URI или state)."));
-        return;
+        emit callbackRejected(m_state.isEmpty()
+            ? QStringLiteral("Нет ожидающего входа. Начните вход заново в этом приложении.")
+            : QStringLiteral("Ссылка не соответствует текущему входу (redirect URI или state)."));
+        return false;
+    }
+    const auto items = query.queryItems();
+    for (const auto &name : {"state", "code", "device_id", "error"}) {
+        if (std::count_if(items.begin(), items.end(), [name](const auto &item) { return item.first == name; }) > 1) {
+            emit callbackRejected(QStringLiteral("В ссылке повторяются параметры входа."));
+            return false;
+        }
     }
     if (query.hasQueryItem("error")) {
+        if (query.hasQueryItem("code") || query.hasQueryItem("device_id")) {
+            emit callbackRejected(QStringLiteral("В ссылке несовместимые параметры входа."));
+            return false;
+        }
         cancel();
         emit failed(QStringLiteral("Вход отменён или отклонён VK ID."));
-        return;
+        return true;
     }
     const auto code = query.queryItemValue("code", QUrl::FullyDecoded);
     const auto device = query.queryItemValue("device_id", QUrl::FullyDecoded);
     if (code.isEmpty() || device.isEmpty()) {
-        emit failed(QStringLiteral("В callback отсутствует code или device_id."));
-        return;
+        emit callbackRejected(QStringLiteral("В ссылке отсутствует code или device_id."));
+        return false;
     }
     Form parameters{{"grant_type", "authorization_code"}, {"code", code},
         {"code_verifier", m_verifier}, {"device_id", device}};
     const auto state = m_state;
+    m_consumedState = state;
     m_state.clear();
     m_verifier.clear();
     m_timeout.stop();
     m_server.close();
     parameters.append({"state", state});
     exchange(parameters, state);
+    return true;
 }
 
 void OAuth::refresh(const QJsonObject &session)
@@ -166,12 +225,14 @@ void OAuth::refresh(const QJsonObject &session)
 
 void OAuth::exchange(Form parameters, const QString &expectedState)
 {
+    m_exchanging = true;
     parameters.append({"client_id", m_clientId});
     parameters.append({"redirect_uri", m_redirect});
     QNetworkRequest request(QUrl("https://id.vk.ru/oauth2/auth"));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
     request.setTransferTimeout(30000);
-    auto reply = m_network.post(request, formBody(parameters));
+    auto reply = m_network->post(request, formBody(parameters));
+    m_reply = reply;
     const auto generation = m_generation;
     QString device;
     for (const auto &[key, value] : parameters)
@@ -179,6 +240,7 @@ void OAuth::exchange(Form parameters, const QString &expectedState)
     connect(reply, &QNetworkReply::finished, this, [this, reply, generation, device, expectedState] {
         reply->deleteLater();
         if (generation != m_generation) return;
+        m_reply.clear(); m_exchanging = false;
         auto result = QJsonDocument::fromJson(reply->readAll()).object();
         if (reply->error() != QNetworkReply::NoError || result.contains("error")
             || result.value("access_token").toString().isEmpty()) {

@@ -57,11 +57,17 @@ void VkApiClient::perform(Request pending)
         reply->deleteLater(); m_active.removeAll(reply);
         if (generation != m_generation) return;
         ApiResult result;
+        result.method = pending.method;
         QJsonParseError parse;
         const auto document = QJsonDocument::fromJson(reply->readAll(), &parse);
         const auto object = document.object();
         const auto error = object.value("error").toObject();
         result.code = error.value("error_code").toInt();
+        // VK has returned this error outside the public schema's access codes.
+        // Classify its specific message without guessing an undocumented code.
+        const auto serverMessage = error.value("error_msg").toString();
+        result.profileTypeUnavailable = serverMessage.contains("method is not available for this profile type", Qt::CaseInsensitive)
+            || serverMessage.contains("method is unavailable with current profile type", Qt::CaseInsensitive);
         if (result.code == 6 && pending.retries < 2 && (pending.method.startsWith("messages.get") || pending.method.startsWith("messages.search"))) {
             ++pending.retries;
             QTimer::singleShot(1000 * pending.retries, this, [this, pending, generation] {
@@ -71,11 +77,16 @@ void VkApiClient::perform(Request pending)
             return;
         }
         if (!error.isEmpty()) {
-            if (result.code == 5) result.error = "Сессия истекла. Войдите в аккаунт снова.";
+            if (result.profileTypeUnavailable) result.error = "VK не разрешает это действие для текущего типа профиля.";
+            else if (result.code == 5) result.error = "Сессия истекла. Войдите в аккаунт снова.";
             else if (result.code == 7 || result.code == 15 || result.code == 27) result.error = "У аккаунта нет доступа к этому действию.";
             else if (result.code == 6 || result.code == 9) result.error = "Слишком много действий. Подождите немного и повторите.";
             else if (result.code == 14) result.error = "VK требует дополнительного подтверждения. Завершите проверку в официальном клиенте и повторите действие.";
-            else result.error = "VK отклонил действие: " + error.value("error_msg").toString("попробуйте позже");
+            else if (result.code == 3) result.error = "Этот метод VK API недоступен.";
+            // Arbitrary server text may echo request parameters. Keep the
+            // diagnostic limited to the method and numeric error code.
+            else result.error = "VK отклонил действие.";
+            result.error += " (" + result.diagnostic() + ")";
         } else if (reply->error() != QNetworkReply::NoError) {
             result.error = "Не удалось связаться с VK. Сообщения останутся в очереди.";
             result.networkFailure = true;

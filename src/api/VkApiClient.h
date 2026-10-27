@@ -14,6 +14,10 @@ struct ApiResult {
     QString error;
     int code = 0;
     bool networkFailure = false;
+    bool profileTypeUnavailable = false;
+    QString method;
+    QString diagnostic() const { return QString("VK API: %1, код %2").arg(method).arg(code); }
+    bool methodUnavailable() const { return code == 3 || code == 7 || code == 15 || code == 27 || profileTypeUnavailable; }
 };
 
 class VkApiClient : public QObject {

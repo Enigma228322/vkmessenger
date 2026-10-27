@@ -1,0 +1,31 @@
+# Caddy 2.6.2 (deployed server): merge these routes into the EXISTING site block for
+# 153-51-114-47.sslip.io, replacing its old /callback handler.
+# Install index.html, callback.js and style.css into /var/www/vkm-login-return.
+# Keep the site's other routes and TLS settings. Validate before reloading.
+# On Caddy >= 2.8 rename skip_log to log_skip.
+# Move any catch-all rewrite into a fallback handle block so it cannot
+# rewrite the asset URLs before these handlers run.
+
+@vkmLoginReturn path /callback /login-return/callback.js /login-return/style.css
+skip_log @vkmLoginReturn
+header @vkmLoginReturn {
+    Cache-Control "no-store"
+    Referrer-Policy "no-referrer"
+    X-Content-Type-Options "nosniff"
+    Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    -ETag
+    -Last-Modified
+}
+
+handle /callback {
+    root * /var/www/vkm-login-return
+    rewrite * /index.html
+    file_server
+}
+
+@vkmLoginAssets path /login-return/callback.js /login-return/style.css
+handle @vkmLoginAssets {
+    root * /var/www/vkm-login-return
+    uri strip_prefix /login-return
+    file_server
+}

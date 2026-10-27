@@ -183,11 +183,11 @@ public:
     }
     QVariantMap currentKeyboard() const { return safeJson(m_rawConversations.value(m_peer).value("conversation").toObject().value("current_keyboard")).toMap(); }
     QVariantMap pinnedMessage() const { return safeJson(m_rawConversations.value(m_peer).value("conversation").toObject().value("chat_settings").toObject().value("pinned_message")).toMap(); }
-    bool canWrite() const { return m_demo || m_rawConversations.value(m_peer).value("conversation").toObject().value("can_write").toObject().value("allowed").toBool(true); }
+    bool canWrite() const { return m_demo || (!m_syncBlocked && m_rawConversations.value(m_peer).value("conversation").toObject().value("can_write").toObject().value("allowed").toBool(true)); }
     void applyLongPoll(const QJsonArray &events);
     Q_INVOKABLE void login();
     Q_INVOKABLE void loginWithToken(const QString &token, const QString &group = {});
-    Q_INVOKABLE void completeLogin(const QString &callback) { m_oauth.complete(callback); emit changed(); }
+    Q_INVOKABLE void completeLogin(const QString &callback);
     Q_INVOKABLE void startDemo();
     Q_INVOKABLE void logout();
     Q_INVOKABLE void selectConversation(const QString &peer, const QString &title);
@@ -231,6 +231,7 @@ private:
     void api(const QString &method, Form parameters, Callback callback);
     void fetchConversations();
     void fetchHistory(bool older = false, bool latest = false, qint64 anchor = -1, bool keepWindow = false);
+    void fetchPublicHistory(const QString &peer, qint64 cmid, int offset, Callback callback);
     struct DiffTransaction {
         quint64 generation;
         QString from, to;
@@ -238,6 +239,7 @@ private:
         QList<QJsonObject> pages;
         QSet<QString> sources;
     };
+    void fetchPublicConversations(const std::shared_ptr<DiffTransaction> &transaction, int offset = 0);
     void fetchDiffPage(const std::shared_ptr<DiffTransaction> &transaction, const QString &source = {});
     void applyDiff(const DiffTransaction &transaction);
     void rebuildConversations();
@@ -320,4 +322,6 @@ private:
     bool m_authorizing = false, m_fetchingConversations = false, m_fetchingHistory = false;
     bool m_conversationsDirty = false, m_historyDirty = false;
     bool m_syncBlocked = false;
+    QString m_messagesAccessError;
+    bool m_publicMessages = false;
 };

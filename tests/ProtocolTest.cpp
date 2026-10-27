@@ -51,11 +51,19 @@ private slots:
     void unsolicitedCallbackRejected()
     {
         OAuth oauth;
-        QSignalSpy failed(&oauth, &OAuth::failed);
+        QSignalSpy rejected(&oauth, &OAuth::callbackRejected);
         QSignalSpy success(&oauth, &OAuth::authenticated);
         oauth.complete("http://127.0.0.1:43821/callback?code=stolen&state=invalid&device_id=x");
-        QCOMPARE(failed.count(), 1);
+        QCOMPARE(rejected.count(), 1);
         QCOMPARE(success.count(), 0);
+    }
+    void appCallbackRouteMustMatch()
+    {
+        QVERIFY(OAuth::isAppCallback(QUrl("vkm://auth/callback?state=fixture&code=fixture&device_id=fixture")));
+        for (const auto &address : {"https://auth/callback", "vkm://chat/callback", "vkm://auth/other", "vkm://auth/callback/",
+            "vkm://user@auth/callback", "vkm://auth:443/callback", "vkm://auth/callback#fragment", "vkm://auth/callback#",
+            "vkm://auth.evil.test/callback", "vkm:auth/callback"})
+            QVERIFY2(!OAuth::isAppCallback(QUrl(address)), address);
     }
     void insecureRedirectRejected()
     {

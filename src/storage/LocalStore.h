@@ -17,7 +17,7 @@ public:
     QString directory() const;
     void loadAccount(const QString &account, Result result);
     void commitDiff(const QString &account, const QList<QJsonObject> &pages,
-                    const QString &version, bool full, Result result);
+                    const QString &version, bool full, Result result, bool replaceConversations = false);
     void loadHistory(const QString &account, const QString &peer, Result result, qint64 before = 0);
     void saveHistory(const QString &account, const QString &peer, const QJsonArray &messages,
                      const QJsonArray &ranges, bool older, bool newer, Result result = {});

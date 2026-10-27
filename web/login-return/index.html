@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Возврат в VK</title>
+  <link rel="stylesheet" href="/login-return/style.css">
+  <script src="/login-return/callback.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Возврат в VK</h1>
+    <p id="status" role="status" aria-live="polite">Подготавливаем возврат в приложение…</p>
+    <a id="return" hidden>Вернуться в приложение</a>
+    <p>Если браузер спросит разрешение открыть VK, подтвердите переход.</p>
+    <details id="manual" hidden>
+      <summary>Приложение не открылось</summary>
+      <p>В приложении выберите «Вставить ссылку вручную» и вставьте адрес из поля ниже.</p>
+      <label for="manual-url">Ссылка для завершения входа</label>
+      <textarea id="manual-url" rows="4" readonly spellcheck="false" autocomplete="off"></textarea>
+    </details>
+    <noscript>Для автоматического возврата нужен JavaScript. В приложении выберите «Вставить ссылку вручную» и вставьте полный адрес этой страницы.</noscript>
+  </main>
+</body>
+</html>
