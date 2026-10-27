@@ -5,6 +5,7 @@
 #include <QQmlContext>
 #include <QFileOpenEvent>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include "media/OggOpusWriter.h"
 #include <QSqlDatabase>
 #include <QJsonDocument>
@@ -73,15 +74,24 @@ int main(int argc, char *argv[])
     if (app.arguments().contains("--demo") || selfCheck) messenger.startDemo();
     if (selfCheck) QTimer::singleShot(500, &app, [&] {
         const bool webp = !QImage::fromData(QByteArray::fromBase64("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA"), "webp").isNull();
+        // MediaCache stores images without extensions. Verify SVG content
+        // detection using the packaged plugin, rather than checking its name.
+        const QByteArray svgData = R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="#ffcc4d"/></svg>)";
+        QTemporaryFile svgFile(isolatedStorage.path() + "/reaction-XXXXXX");
+        bool svg = false;
+        if (svgFile.open() && svgFile.write(svgData) == svgData.size() && svgFile.flush()) {
+            const auto image = QImageReader(svgFile.fileName()).read();
+            svg = !image.isNull() && image.size() == QSize(24, 24) && image.pixelColor(12, 12) == QColor("#ffcc4d");
+        }
         const bool brand = app.applicationName() == "VK" && !engine.rootObjects().isEmpty() && engine.rootObjects().first()->property("title").toString() == "VK";
-        QJsonObject result{{"vkIdConfigured", messenger.loginConfigured()}, {"vkAppId", messenger.property("clientId").toString()}, {"vkRedirectUri", messenger.property("redirectUri").toString()}, {"brand", brand}, {"webp", webp}, {"tokenEntry", tokenEntryAvailable}, {"apiInspector", messenger.apiInspectorEnabled()}, {"qml", !engine.rootObjects().isEmpty()}, {"sqlite", QSqlDatabase::isDriverAvailable("QSQLITE")}, {"gif", QImageReader::supportedImageFormats().contains("gif")},
+        QJsonObject result{{"vkIdConfigured", messenger.loginConfigured()}, {"vkAppId", messenger.property("clientId").toString()}, {"vkRedirectUri", messenger.property("redirectUri").toString()}, {"brand", brand}, {"webp", webp}, {"svg", svg}, {"tokenEntry", tokenEntryAvailable}, {"apiInspector", messenger.apiInspectorEnabled()}, {"qml", !engine.rootObjects().isEmpty()}, {"sqlite", QSqlDatabase::isDriverAvailable("QSQLITE")}, {"gif", QImageReader::supportedImageFormats().contains("gif")},
             {"voiceOggOpus", OggOpusWriter::selfCheck()}, {"demoMessages", messenger.messages()->rowCount()}};
         for (const auto &arg : app.arguments()) if (arg.startsWith("--screenshot=")) {
             auto window = engine.rootObjects().isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(engine.rootObjects().first());
             result.insert("screenshot", window && window->grabWindow().save(arg.mid(13)));
         }
         QTextStream(stdout) << QJsonDocument(result).toJson(QJsonDocument::Compact) << Qt::endl;
-        app.exit(brand && webp && tokenEntryAvailable && result.value("qml").toBool() && result.value("sqlite").toBool() && result.value("gif").toBool() && result.value("voiceOggOpus").toBool() ? 0 : 2);
+        app.exit(brand && webp && svg && tokenEntryAvailable && result.value("qml").toBool() && result.value("sqlite").toBool() && result.value("gif").toBool() && result.value("voiceOggOpus").toBool() ? 0 : 2);
     });
     return app.exec();
 }

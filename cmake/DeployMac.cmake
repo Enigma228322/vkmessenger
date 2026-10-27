@@ -20,7 +20,7 @@ endforeach()
 file(REMOVE_RECURSE "${APP_BUNDLE}/Contents/PlugIns/sqldrivers")
 set(PLUGIN_ARGUMENTS)
 set(PLUGIN_FILES)
-foreach(PLUGIN IN ITEMS platforms/libqcocoa.dylib platforms/libqoffscreen.dylib tls/libqsecuretransportbackend.dylib imageformats/libqjpeg.dylib imageformats/libqgif.dylib
+foreach(PLUGIN IN ITEMS platforms/libqcocoa.dylib platforms/libqoffscreen.dylib tls/libqsecuretransportbackend.dylib imageformats/libqjpeg.dylib imageformats/libqgif.dylib imageformats/libqsvg.dylib
     sqldrivers/libqsqlite.dylib multimedia/libdarwinmediaplugin.dylib multimedia/libffmpegmediaplugin.dylib)
     if(NOT EXISTS "${QT_ROOT}/plugins/${PLUGIN}")
         message(FATAL_ERROR "Missing Qt plugin: ${PLUGIN}")

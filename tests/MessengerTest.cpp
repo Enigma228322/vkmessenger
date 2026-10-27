@@ -704,6 +704,10 @@ private slots:
 
     void reactionCatalogAndImagesRenderInMessagesAndPicker()
     {
+        QFile svgFile(QFINDTESTDATA("fixtures/reaction.svg")); QVERIFY(svgFile.open(QIODevice::ReadOnly));
+        const auto svg = svgFile.readAll();
+        QVERIFY(QImageReader::supportedImageFormats().contains("svg"));
+        const auto svgImage = QImage::fromData(svg); QVERIFY(!svgImage.isNull()); QCOMPARE(svgImage.size(), QSize(48, 48));
         const auto webp = QByteArray::fromBase64("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA");
 #ifdef Q_OS_MACOS
         QVERIFY(QImageReader::supportedImageFormats().contains("webp"));
@@ -713,9 +717,10 @@ private slots:
         QPainter painter(&icon); painter.setPen(Qt::NoPen); painter.setBrush(QColor("#ed657b")); painter.drawEllipse(4, 4, 40, 40); painter.end();
         QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(icon.save(&buffer, "PNG"));
         TokenNetwork network;
-        const QByteArray catalog = R"({"response":{"assets":[{"reaction_id":1,"links":{"static":"https://assets.test/base.png"}},{"reaction_id":2,"links":{"static":"https://assets.test/second.webp"}},{"reaction_id":3,"links":{"static":"https://assets.test/hidden.png"}}],"override_assets":[{"reaction_id":1,"links":{"static":"https://assets.test/override.png"}}],"reaction_ids":[1,2]}})";
+        const QByteArray catalog = R"({"response":{"assets":[{"reaction_id":1,"links":{"static":"https://assets.test/base.png"}},{"reaction_id":2,"links":{"static":"https://assets.test/second.webp"}},{"reaction_id":3,"links":{"static":"https://assets.test/third.svg"}},{"reaction_id":4,"links":{"static":"https://assets.test/hidden.png"}}],"override_assets":[{"reaction_id":1,"links":{"static":"https://assets.test/override.png"}}],"reaction_ids":[1,2,3]}})";
         network.responses["messages.getReactionsAssets"] = {catalog, catalog, catalog};
         network.responses["override.png"] = {png}; network.responses["second.webp"] = {webp};
+        network.responses["third.svg"] = {svg};
         network.responses["messages.getFolders"] = {R"({"response":{"items":[]}})"};
         network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":1,"out_read_cmid":1},"message":[{"id":900,"conversation_message_id":1,"peer_id":77,"from_id":42,"date":1792830000,"out":1,"text":"adsda","reactions":[{"reaction_id":1,"count":1,"user_ids":[42]},{"reaction_id":2,"count":12,"user_ids":[42]}]}]}]}})"};
         network.responses["messages.getDiffContent"] = {R"({"response":{"items":[{"peer_id":77,"messages":[{"id":900,"conversation_message_id":1,"peer_id":77,"from_id":42,"date":1792830000,"out":1,"text":"adsda","reactions":[{"reaction_id":1,"count":1,"user_ids":[42]},{"reaction_id":2,"count":12,"user_ids":[42]}]}]}]}})"};
@@ -723,6 +728,10 @@ private slots:
         auto info = diff.value("conversations_info").toArray().first().toObject();
         auto conversation = info.value("conversation").toObject(); conversation.insert("last_conversation_message_id", 3); conversation.insert("out_read_cmid", 3); info.insert("conversation", conversation);
         auto messages = info.value("message").toArray();
+        auto reactedMessage = messages[0].toObject();
+        auto reactions = reactedMessage.value("reactions").toArray();
+        reactions.append(QJsonObject{{"reaction_id", 3}, {"count", 2}, {"user_ids", QJsonArray{42, 77}}});
+        reactedMessage.insert("reactions", reactions); messages[0] = reactedMessage;
         messages.append(QJsonObject{{"conversation_message_id", 2}, {"peer_id", 77}, {"from_id", 42}, {"date", 1792830060}, {"out", 1}, {"text", ""}, {"attachments", QJsonArray{QJsonObject{{"type", "sticker"}, {"sticker", QJsonObject{{"sticker_id", 1}, {"images", QJsonArray{QJsonObject{{"url", "https://assets.test/second.webp"}, {"width", 1}, {"height", 1}}}}}}}}}});
         messages.append(QJsonObject{{"conversation_message_id", 3}, {"peer_id", 77}, {"from_id", 42}, {"date", 1792830120}, {"out", 1}, {"text", "фыв"}});
         info.insert("message", messages); diff.insert("conversations_info", QJsonArray{info});
@@ -739,12 +748,18 @@ private slots:
             const auto visit = [&](auto &&self, QQuickItem *item) -> void { if (item->objectName() == name) items.append(item); for (auto child : item->childItems()) self(self, child); };
             visit(visit, window->contentItem()); return items;
         };
-        QTRY_COMPARE(messenger.actions()->reactionAssets().size(), 3);
+        QTRY_COMPARE(messenger.actions()->reactionAssets().size(), 4);
         QCOMPARE(messenger.actions()->reactionImage(1), "https://assets.test/override.png");
         QCOMPARE(messenger.actions()->reactionImage(2), "https://assets.test/second.webp");
-        QCOMPARE(messenger.actions()->selectableReactions().size(), 2);
-        QTRY_COMPARE(visualItems("reactionChip").size(), 2);
-        QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() == 2 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
+        QCOMPARE(messenger.actions()->reactionImage(3), "https://assets.test/third.svg");
+        QCOMPARE(messenger.actions()->selectableReactions().size(), 3);
+        QTRY_COMPARE(visualItems("reactionChip").size(), 3);
+        QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() == 3 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
+        const auto cachedSvg = messenger.media()->cached(QUrl("https://assets.test/third.svg"));
+        QVERIFY(cachedSvg.isLocalFile()); QVERIFY(QFileInfo(cachedSvg.toLocalFile()).suffix().isEmpty());
+        const auto cachedSvgImage = QImageReader(cachedSvg.toLocalFile()).read();
+        QVERIFY(!cachedSvgImage.isNull()); QCOMPARE(cachedSvgImage.size(), QSize(48, 48));
+        QVERIFY(cachedSvgImage.pixelColor(24, 24).alpha() > 0);
         QTRY_VERIFY(!messenger.loading());
         QTRY_VERIFY([&] { const auto images = visualItems("attachmentImage"); return images.size() == 1 && images.first()->property("status").toInt() == 1 && images.first()->height() > 100; }());
         auto chips = visualItems("reactionChip");
@@ -752,15 +767,15 @@ private slots:
         QVERIFY(chips[1]->x() > chips[0]->x()); QCOMPARE(chips[0]->y(), chips[1]->y());
         if (qEnvironmentVariableIsSet("VKM_REACTION_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_REACTION_SCREENSHOT")));
         auto picker = window->findChild<QObject *>("reactionPicker"); QVERIFY(picker); QVERIFY(QMetaObject::invokeMethod(picker, "open"));
-        QTRY_VERIFY(!messenger.actions()->busy()); QTRY_COMPARE(messenger.actions()->results().size(), 2);
-        QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() >= 4 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
+        QTRY_VERIFY(!messenger.actions()->busy()); QTRY_COMPARE(messenger.actions()->results().size(), 3);
+        QTRY_VERIFY([&] { const auto images = visualItems("reactionImage"); return images.size() >= 6 && std::all_of(images.begin(), images.end(), [](auto image) { return image->property("status").toInt() == 1; }); }());
         if (qEnvironmentVariableIsSet("VKM_PICKER_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_PICKER_SCREENSHOT")));
         QVERIFY(QMetaObject::invokeMethod(picker, "close"));
         auto popup = window->findChild<QObject *>("messageActionPopup"); QVERIFY(popup);
         auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
         QVERIFY(QMetaObject::invokeMethod(popup, "showAt", Q_ARG(QVariant, QVariant::fromValue(history)), Q_ARG(QVariant, messenger.messages()->get(0)), Q_ARG(QVariant, QVariant::fromValue(history))));
         QTRY_VERIFY(popup->property("opened").toBool());
-        QTRY_COMPARE(visualItems("quickReaction").size(), 2); // server-hidden ID is not offered
+        QTRY_COMPARE(visualItems("quickReaction").size(), 3); // server-hidden ID is not offered
         QTRY_VERIFY([&] { for (auto button : visualItems("quickReaction")) { const auto image = qvariant_cast<QQuickItem *>(button->property("contentItem")); if (!image || !image->property("ready").toBool()) return false; } return true; }());
         if (qEnvironmentVariableIsSet("VKM_ACTIONS_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_ACTIONS_SCREENSHOT")));
 

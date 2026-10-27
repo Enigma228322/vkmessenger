@@ -6,7 +6,7 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent Sql Multimedia)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Quick QuickControls2 Network Concurrent Sql Multimedia Svg)
 find_package(ZLIB REQUIRED)
 include(cmake/Rlottie.cmake)
 include(cmake/Opus.cmake)

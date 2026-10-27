@@ -71,7 +71,7 @@ API обслуживается общей очередью с интервало
 
 ## Сборка
 
-Нужны Xcode Command Line Tools, CMake, Qt Quick, Quick Controls, Network, Concurrent, SQL, Multimedia и Qt Test. rlottie и libopus 1.6.1 закреплены на конкретных версиях; архивы проверяются SHA-256. При первой конфигурации нужны доступ к исходникам или подготовленные локальные зависимости.
+Нужны Xcode Command Line Tools, CMake, Qt Quick, Quick Controls, Network, Concurrent, SQL, Multimedia, SVG и Qt Test. rlottie и libopus 1.6.1 закреплены на конкретных версиях; архивы проверяются SHA-256. При первой конфигурации нужны доступ к исходникам или подготовленные локальные зависимости.
 
 ```sh
 cmake -S . -B build \
@@ -97,9 +97,9 @@ cmake -DAPP_BUNDLE="$PWD/build/VK.app" \
 QT_QPA_PLATFORM=offscreen build/VK.app/Contents/MacOS/VK --self-check
 ```
 
-`--self-check` использует временное хранилище и не читает, не сохраняет и не удаляет сессию Keychain. Проверяет загрузку QML, SQLite, GIF, декодирование WebP и реальное кодирование Ogg/Opus во временный файл. Запускайте после DeployMac, чтобы Qt и плагины внутри bundle соответствовали свежему бинарнику. Можно добавить `--screenshot=/absolute/path/preview.png`.
+`--self-check` использует временное хранилище и не читает, не сохраняет и не удаляет сессию Keychain. Проверяет загрузку QML, SQLite, GIF, декодирование WebP и SVG (из файла без расширения, как в медиакэше) и реальное кодирование Ogg/Opus во временный файл. Запускайте после DeployMac, чтобы Qt и плагины внутри bundle соответствовали свежему бинарнику. Можно добавить `--screenshot=/absolute/path/preview.png`.
 
-DeployMac включает Cocoa, offscreen, TLS, JPEG/GIF, SQLite и мультимедийные плагины с их зависимостями, подписывает bundle ad-hoc и проверяет подпись. Для внешнего распространения остаются Developer ID и notarization.
+DeployMac включает Cocoa, offscreen, TLS, JPEG/GIF/SVG, SQLite и мультимедийные плагины с их зависимостями, подписывает bundle ad-hoc и проверяет подпись. Для внешнего распространения остаются Developer ID и notarization.
 
 ```sh
 mkdir -p dist
@@ -122,7 +122,7 @@ ditto -c -k --sequesterRsrc --keepParent build/VK.app dist/VK-0.2.0-macOS-arm64.
 - восстановление подготовленного вложения после удаления исходного файла;
 - передачу правильных CMID и сохранение вложений при редактировании через пользовательский диалог;
 - границы времени и галочек, короткие/многострочные сообщения, геометрию ленты и сохранение позиции при подгрузке;
-- объединение переопределений каталога реакций по ID, фактическую загрузку PNG/WebP в чипы и picker, WebP-стикер.
+- объединение переопределений каталога реакций по ID, фактическую загрузку PNG/WebP/SVG в чипы, picker и быстрое меню, WebP-стикер.
 
 Тесты используют подставной API и отдельные каталоги. Живые операции VK, реальная запись микрофона, визуальная плавность на Metal и полный паритет с web требуют отдельных проверок из PLAN.md.
 
