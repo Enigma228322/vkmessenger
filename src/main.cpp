@@ -74,7 +74,7 @@ int main(int argc, char *argv[])
     if (selfCheck) QTimer::singleShot(500, &app, [&] {
         const bool webp = !QImage::fromData(QByteArray::fromBase64("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA"), "webp").isNull();
         const bool brand = app.applicationName() == "VK" && !engine.rootObjects().isEmpty() && engine.rootObjects().first()->property("title").toString() == "VK";
-        QJsonObject result{{"brand", brand}, {"webp", webp}, {"tokenEntry", tokenEntryAvailable}, {"apiInspector", messenger.apiInspectorEnabled()}, {"qml", !engine.rootObjects().isEmpty()}, {"sqlite", QSqlDatabase::isDriverAvailable("QSQLITE")}, {"gif", QImageReader::supportedImageFormats().contains("gif")},
+        QJsonObject result{{"vkIdConfigured", messenger.loginConfigured()}, {"vkAppId", messenger.property("clientId").toString()}, {"vkRedirectUri", messenger.property("redirectUri").toString()}, {"brand", brand}, {"webp", webp}, {"tokenEntry", tokenEntryAvailable}, {"apiInspector", messenger.apiInspectorEnabled()}, {"qml", !engine.rootObjects().isEmpty()}, {"sqlite", QSqlDatabase::isDriverAvailable("QSQLITE")}, {"gif", QImageReader::supportedImageFormats().contains("gif")},
             {"voiceOggOpus", OggOpusWriter::selfCheck()}, {"demoMessages", messenger.messages()->rowCount()}};
         for (const auto &arg : app.arguments()) if (arg.startsWith("--screenshot=")) {
             auto window = engine.rootObjects().isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(engine.rootObjects().first());

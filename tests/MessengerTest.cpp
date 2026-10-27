@@ -4,6 +4,7 @@
 #include "Keychain.h"
 #include "LottieSticker.h"
 #include <QGuiApplication>
+#include <QDesktopServices>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -84,6 +85,14 @@ protected:
     }
 };
 
+class LoginBrowserCapture : public QObject {
+    Q_OBJECT
+public:
+    QUrl url;
+public slots:
+    void capture(const QUrl &value) { url = value; }
+};
+
 class MessengerTest : public QObject {
     Q_OBJECT
     QTemporaryDir m_storage;
@@ -96,12 +105,57 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_storage.path() + "/settings");
     }
 
+    void configuredVkIdProvidesProductionHttpsReturn()
+    {
+        Messenger messenger;
+        messenger.setProperty("clientId", "54850913");
+        messenger.setProperty("redirectUri", "https://153-51-114-47.sslip.io/callback");
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto root = engine.rootObjects().first();
+        LoginBrowserCapture browser;
+        QDesktopServices::setUrlHandler("https", &browser, "capture");
+        messenger.login();
+        QDesktopServices::unsetUrlHandler("https");
+        QVERIFY(messenger.browserLoginPending());
+        QCOMPARE(browser.url.host(), QString("id.vk.ru"));
+        const QUrlQuery parameters(browser.url);
+        QCOMPARE(parameters.queryItemValue("client_id"), QString("54850913"));
+        QCOMPARE(parameters.queryItemValue("app_id"), parameters.queryItemValue("client_id"));
+        QCOMPARE(parameters.queryItemValue("sdk_type"), QString("vkid"));
+        QCOMPARE(parameters.queryItemValue("v"), QString("2.6.1"));
+        QCOMPARE(parameters.queryItemValue("response_type"), QString("code"));
+        QCOMPARE(parameters.queryItemValue("code_challenge_method"), QString("s256"));
+        QVERIFY(!parameters.hasQueryItem("code_verifier"));
+        QVERIFY(!parameters.hasQueryItem("client_secret"));
+        QCOMPARE(parameters.queryItemValue("redirect_uri", QUrl::FullyDecoded), QString("https://153-51-114-47.sslip.io/callback"));
+        QVERIFY(!parameters.queryItemValue("state").isEmpty());
+        QVERIFY(!parameters.queryItemValue("code_challenge").isEmpty());
+        auto dialog = root->findChild<QObject *>("vkIdReturnDialog"); QVERIFY(dialog);
+        auto field = root->findChild<QObject *>("vkIdReturnInput"); QVERIFY(field);
+        auto submit = root->findChild<QObject *>("vkIdReturnSubmit"); QVERIFY(submit);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+        QVERIFY(field->property("visible").toBool());
+        QCOMPARE(field->property("echoMode").toInt(), 2);
+        QVERIFY(!submit->property("enabled").toBool());
+        field->setProperty("text", "https://153-51-114-47.sslip.io/callback?code=test&state=wrong&device_id=test");
+        QVERIFY(submit->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(submit, "clicked"));
+        QVERIFY(!messenger.authorizing());
+        QVERIFY(!messenger.browserLoginPending());
+        QVERIFY(!messenger.connected());
+        QVERIFY(!messenger.error().isEmpty());
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(field->property("text").toString(), QString());
+    }
+
     void manualTokenLoginAndPersistence()
     {
         TokenNetwork network;
         Messenger messenger(nullptr, &network);
         messenger.loginWithToken("  manual+token/%2B== \n");
         QVERIFY(messenger.authorizing());
+        QVERIFY(!messenger.browserLoginPending());
         QVERIFY(!messenger.connected());
         QTRY_VERIFY(messenger.connected());
         QVERIFY(!messenger.authorizing());
@@ -857,6 +911,96 @@ private slots:
         QVERIFY(folders->contains("3", "88"));
         QCOMPARE(messenger.actions()->reactionImage(7), "https://example.test/reaction.png");
         folders->create("Без сети", {"77"}); QVERIFY(!folders->busy()); QVERIFY(!folders->error().isEmpty()); QCOMPARE(folders->items().size(), 2);
+    }
+
+    void searchInvalidatesImmediatelyAndRestartsOnScopeChange()
+    {
+        TokenNetwork network;
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("test-token"); QTRY_VERIFY(messenger.connected());
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto sheet = engine.rootObjects().first()->findChild<QObject *>("actionSheet"); QVERIFY(sheet);
+        QVERIFY(QMetaObject::invokeMethod(sheet, "show", Q_ARG(QVariant, "search"), Q_ARG(QVariant, "77"), Q_ARG(QVariant, QStringList()), Q_ARG(QVariant, "")));
+        auto query = sheet->findChild<QObject *>("actionSearch"); QVERIFY(query);
+        auto scope = sheet->findChild<QObject *>("searchWithinChat"); QVERIFY(scope);
+        auto actions = messenger.actions();
+        const QByteArray result = R"({"response":{"items":[{"peer_id":77,"conversation_message_id":1,"text":"Found"}]}})";
+        query->setProperty("text", "old");
+        QVERIFY(QMetaObject::invokeMethod(query, "accepted"));
+        QTRY_COMPARE(network.replies["messages.search"].size(), 1);
+        query->setProperty("text", "new");
+        QVERIFY(QMetaObject::invokeMethod(query, "textEdited"));
+        QVERIFY(!actions->busy()); QVERIFY(actions->results().isEmpty());
+        network.replies["messages.search"][0]->deliver(result);
+        QVERIFY(actions->results().isEmpty()); // rejected even inside the debounce window
+        QTRY_COMPARE(network.replies["messages.search"].size(), 2);
+        network.replies["messages.search"][1]->deliver(result);
+        QTRY_COMPARE(actions->results().size(), 1);
+        scope->setProperty("checked", false);
+        QVERIFY(QMetaObject::invokeMethod(scope, "toggled"));
+        QVERIFY(actions->results().isEmpty());
+        QTRY_COMPARE(network.replies["messages.search"].size(), 3);
+        QList<QUrlQuery> searches;
+        for (const auto &request : network.requests) if (request.first.path().endsWith("messages.search")) searches.append(QUrlQuery(QString::fromUtf8(request.second)));
+        QCOMPARE(searches[1].queryItemValue("q"), "new");
+        QCOMPARE(searches[1].queryItemValue("peer_id"), "77");
+        QVERIFY(!searches[2].hasQueryItem("peer_id"));
+        query->setProperty("text", "   ");
+        QVERIFY(QMetaObject::invokeMethod(query, "textEdited"));
+        network.replies["messages.search"][2]->deliver(result);
+        QVERIFY(actions->results().isEmpty()); QVERIFY(!actions->hasMore());
+        QTest::qWait(450);
+        QCOMPARE(network.replies["messages.search"].size(), 3);
+        query->setProperty("text", "closed");
+        QVERIFY(QMetaObject::invokeMethod(query, "accepted"));
+        QTRY_COMPARE(network.replies["messages.search"].size(), 4);
+        QVERIFY(QMetaObject::invokeMethod(sheet, "close"));
+        QTRY_VERIFY(!sheet->property("visible").toBool());
+        network.replies["messages.search"][3]->deliver(result);
+        QVERIFY(actions->results().isEmpty()); QVERIFY(!actions->busy());
+        // Direct callers get the same blank-query invalidation.
+        actions->search("direct", "77");
+        QTRY_COMPARE(network.replies["messages.search"].size(), 5);
+        actions->search("", "77");
+        network.replies["messages.search"][4]->deliver(result);
+        QVERIFY(actions->results().isEmpty()); QVERIFY(!actions->busy());
+    }
+
+    void searchPaginationKeepsServerOrderAndDeduplicatesByPeer()
+    {
+        TokenNetwork network;
+        QJsonArray cached;
+        for (int i = 1; i <= 100; ++i) cached.append(QJsonObject{{"peer_id", 77}, {"conversation_message_id", i}, {"text", "Needle cached"}});
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":100},"message":[{"peer_id":77,"conversation_message_id":100,"text":"Needle cached"}]}]}})"};
+        network.responses["messages.getDiffContent"] = {QJsonDocument(QJsonObject{{"response", QJsonObject{{"items", QJsonArray{QJsonObject{{"peer_id", 77}, {"messages", cached}}}}}}}).toJson()};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        messenger.selectConversation("77", "Search"); QTRY_COMPARE(messenger.messages()->rowCount(), 100);
+        auto actions = messenger.actions();
+        actions->search("Needle", "");
+        QTRY_COMPARE(network.replies["messages.search"].size(), 1);
+        QTRY_VERIFY(actions->cachedResults()); QCOMPARE(actions->results().size(), 50);
+        QJsonArray firstPage;
+        for (int i = 201; i <= 250; ++i) firstPage.append(QJsonObject{{"peer_id", 77}, {"conversation_message_id", i}, {"text", "Needle server"}});
+        network.replies["messages.search"][0]->deliver(QJsonDocument(QJsonObject{{"response", QJsonObject{{"items", firstPage}}}}).toJson());
+        QVERIFY(!actions->cachedResults()); QVERIFY(actions->hasMore());
+        QCOMPARE(actions->results().first().toMap().value("cmid").toString(), "201");
+        actions->search("Needle", "", true);
+        QTRY_COMPARE(network.replies["messages.search"].size(), 2);
+        // A local second page must not be appended while waiting for the server.
+        QTest::qWait(100);
+        QCOMPARE(actions->results().size(), 50); QVERIFY(!actions->cachedResults());
+        network.replies["messages.search"][1]->deliver(R"({"response":{"items":[{"peer_id":77,"conversation_message_id":250,"text":"Updated"},{"peer_id":88,"conversation_message_id":250,"text":"Other chat"},{"peer_id":77,"conversation_message_id":251,"text":"Next"}]}})");
+        QTRY_VERIFY(!actions->busy());
+        QCOMPARE(actions->results().size(), 52); QVERIFY(!actions->hasMore());
+        QCOMPARE(actions->results()[49].toMap().value("text").toString(), "Updated");
+        QCOMPARE(actions->results()[50].toMap().value("peer").toString(), "88");
+        QCOMPARE(actions->results()[51].toMap().value("cmid").toString(), "251");
+        QStringList offsets;
+        for (const auto &request : network.requests) if (request.first.path().endsWith("messages.search"))
+            offsets.append(QUrlQuery(QString::fromUtf8(request.second)).queryItemValue("offset"));
+        QCOMPARE(offsets, (QStringList{"0", "50"}));
     }
 
     void nativeMessageActionsUseContextAndPreserveAttachments()

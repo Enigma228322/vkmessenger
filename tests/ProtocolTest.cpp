@@ -39,6 +39,15 @@ private slots:
         QVERIFY(!OAuth::sameRedirect(QUrl("http://user@127.0.0.1:43821/callback"), expected));
         QVERIFY(!OAuth::sameRedirect(QUrl("http://127.0.0.1:43821/callback#code=test"), expected));
     }
+    void registeredHttpsRedirectMustMatch()
+    {
+        const QUrl expected("https://153-51-114-47.sslip.io/callback");
+        QVERIFY(OAuth::sameRedirect(QUrl("https://153-51-114-47.sslip.io/callback?code=test&device_id=test"), expected));
+        QVERIFY(!OAuth::sameRedirect(QUrl("http://153-51-114-47.sslip.io/callback?code=test"), expected));
+        QVERIFY(!OAuth::sameRedirect(QUrl("https://153-51-114-47.sslip.io.evil.test/?code=test"), expected));
+        QVERIFY(!OAuth::sameRedirect(QUrl("https://153-51-114-47.sslip.io/other?code=test"), expected));
+        QVERIFY(!OAuth::sameRedirect(QUrl("https://153-51-114-47.sslip.io/callback#code=test"), expected));
+    }
     void unsolicitedCallbackRejected()
     {
         OAuth oauth;

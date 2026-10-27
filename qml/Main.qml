@@ -298,6 +298,8 @@ ApplicationWindow {
             }
         }
         function onChanged() {
+            if (messenger.browserLoginPending && messenger.redirectUri.indexOf("https://") === 0) loginReturn.open()
+            else if (!messenger.authorizing) loginReturn.close()
             if (messenger.selectedPeer !== window.draftPeer) {
                 window.editingMessage = ""
                 window.editingPeer = ""
@@ -588,6 +590,7 @@ ApplicationWindow {
                     ActionButton {
                         Layout.alignment: Qt.AlignHCenter
                         visible: !messenger.connected && messenger.loginConfigured
+                        objectName: "vkIdLoginButton"
                         text: messenger.authorizing ? "Ожидаем вход…" : "Войти через VK"
                         primary: true; enabled: !messenger.authorizing
                         onClicked: messenger.login()
@@ -1204,7 +1207,7 @@ ApplicationWindow {
                 objectName: "reactionGrid"
                 cellWidth: 70
                 cellHeight: 70
-                model: messenger.actions.results
+                model: reactionPicker.visible ? messenger.actions.results : []
                 delegate: Button {
                     required property var modelData
                     width: 62; height: 62
@@ -1307,6 +1310,47 @@ ApplicationWindow {
                         inspector.item.openMethod("messages.sendMessageEventAnswer", {event_id: data.event_id, peer_id: String(data.peer_id || ""), user_id: String(data.user_id || data.owner_id || "")})
                     }
                 }
+            }
+        }
+    }
+
+    Dialog {
+        id: loginReturn
+        objectName: "vkIdReturnDialog"
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(500, window.width - 40)
+        title: "Завершение входа VK ID"
+        modal: true
+        padding: 24
+        standardButtons: Dialog.Cancel
+        onRejected: messenger.logout()
+        onClosed: loginReturnUrl.clear()
+        background: Rectangle { color: window.surface; radius: 16; border.color: design.divider }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Label {
+                Layout.fillWidth: true
+                text: "Завершите вход в браузере. После перехода на " + messenger.redirectUri + " скопируйте полный адрес из адресной строки и вставьте его сюда."
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+            }
+            Input {
+                id: loginReturnUrl
+                objectName: "vkIdReturnInput"
+                Layout.fillWidth: true
+                placeholderText: "Адрес страницы после входа"
+                echoMode: TextInput.Password
+                enabled: messenger.browserLoginPending
+                onAccepted: if (loginReturnUrl.text.trim().length && messenger.browserLoginPending) messenger.completeLogin(loginReturnUrl.text)
+            }
+            ActionButton {
+                objectName: "vkIdReturnSubmit"
+                Layout.fillWidth: true
+                text: messenger.browserLoginPending ? "Завершить вход" : "Проверяем вход…"
+                primary: true
+                enabled: messenger.browserLoginPending && loginReturnUrl.text.trim().length > 0
+                onClicked: { messenger.completeLogin(loginReturnUrl.text); loginReturnUrl.clear() }
             }
         }
     }

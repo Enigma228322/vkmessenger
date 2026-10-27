@@ -21,7 +21,10 @@ Dialog {
     property bool canDeleteForAll: false
     property string attachmentType: "photo"
     property bool reducedMotion: false
-    onClosed: searchDelay.stop()
+    onClosed: {
+        searchDelay.stop()
+        if (picker || mode === "search") controller.reset()
+    }
     readonly property bool picker: ["forward", "create", "add", "peers"].indexOf(mode) >= 0
     readonly property bool messageResults: ["search", "important", "attachments"].indexOf(mode) >= 0
     readonly property var controller: messenger.actions
@@ -51,6 +54,18 @@ Dialog {
         if (selectedPeers.indexOf(id) >= 0) selectedPeers = selectedPeers.filter(function(p) { return p !== id })
         else selectedPeers = selectedPeers.concat([id])
     }
+    function scheduleSearch() {
+        searchDelay.stop()
+        controller.reset()
+        if (query.text.trim().length && !query.inputMethodComposing) searchDelay.restart()
+    }
+    function runSearch() {
+        searchDelay.stop()
+        if (!query.text.trim().length || query.inputMethodComposing) return
+        if (mode === "search") controller.search(query.text, withinChat ? peer : "", false)
+        else if (mode === "forward") controller.searchPeers(query.text)
+        else controller.searchPeople(query.text)
+    }
     function submit() {
         if (controller.busy) return
         if (mode === "edit") controller.editMessage(peer, cmids[0], editor.text)
@@ -77,10 +92,11 @@ Dialog {
             Layout.fillWidth: true
             visible: sheet.picker || sheet.mode === "search"
             placeholderText: sheet.mode === "search" ? "Найти в сообщениях" : "Поиск людей и диалогов"
-            onTextEdited: searchDelay.restart()
-            onAccepted: { searchDelay.stop(); if (sheet.mode === "search") sheet.controller.search(text, sheet.withinChat ? sheet.peer : "", false); else if (sheet.mode === "forward") sheet.controller.searchPeers(text); else sheet.controller.searchPeople(text) }
+            onTextEdited: sheet.scheduleSearch()
+            onInputMethodComposingChanged: sheet.scheduleSearch()
+            onAccepted: { sheet.controller.reset(); sheet.runSearch() }
         }
-        CheckBox { visible: sheet.mode === "search" && sheet.peer.length > 0; text: "Только в этой переписке"; checked: sheet.withinChat; onToggled: sheet.withinChat = checked }
+        CheckBox { objectName: "searchWithinChat"; visible: sheet.mode === "search" && sheet.peer.length > 0; text: "Только в этой переписке"; checked: sheet.withinChat; onToggled: { sheet.withinChat = checked; sheet.scheduleSearch() } }
         Label { visible: sheet.mode === "search" && sheet.controller.cachedResults; text: "Результаты из сохранённой истории"; color: "#788697" }
         RowLayout {
             visible: sheet.mode === "attachments"
@@ -141,7 +157,8 @@ Dialog {
             }
             footer: Button {
                 visible: (sheet.messageResults || sheet.mode === "members") && sheet.controller.hasMore
-                text: "Показать ещё"; enabled: !sheet.controller.busy
+                objectName: "actionSearchMore"
+                text: "Показать ещё"; enabled: !sheet.controller.busy && !searchDelay.running
                 onClicked: {
                     if (sheet.mode === "members") sheet.controller.loadMembers(sheet.peer, true)
                     else if (sheet.mode === "search") sheet.controller.search(query.text, sheet.withinChat ? sheet.peer : "", true)
@@ -149,7 +166,7 @@ Dialog {
                     else sheet.controller.loadAttachments(sheet.peer, sheet.attachmentType, true)
                 }
             }
-            Label { anchors.centerIn: parent; visible: results.count === 0 && !sheet.controller.busy && !sheet.controller.error.length; text: query.text.length ? "Ничего не найдено" : sheet.mode === "search" ? "Введите поисковый запрос" : "Пока ничего нет"; color: "#788697" }
+            Label { anchors.centerIn: parent; visible: results.count === 0 && !sheet.controller.busy && !searchDelay.running && !query.inputMethodComposing && !sheet.controller.error.length; text: query.text.trim().length ? "Ничего не найдено" : sheet.mode === "search" ? "Введите поисковый запрос" : "Пока ничего нет"; color: "#788697" }
         }
         GridView {
             Layout.fillWidth: true; Layout.fillHeight: true
@@ -176,13 +193,7 @@ Dialog {
     }
     Timer {
         id: searchDelay; interval: 350
-        onTriggered: {
-            sheet.controller.reset()
-            if (!query.text.trim().length) return
-            if (sheet.mode === "search") sheet.controller.search(query.text, sheet.withinChat ? sheet.peer : "", false)
-            else if (sheet.mode === "forward") sheet.controller.searchPeers(query.text)
-            else sheet.controller.searchPeople(query.text)
-        }
+        onTriggered: sheet.runSearch()
     }
     Connections {
         target: messenger.actions

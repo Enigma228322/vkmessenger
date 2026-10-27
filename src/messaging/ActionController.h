@@ -86,6 +86,7 @@ private:
     qint64 m_reactionsCachedAt = 0;
     quint64 m_generation = 0;
     int m_offset = 0;
+    QString m_searchQuery, m_searchPeer;
     QString m_attachmentCmid;
     int m_attachmentPosition = -1;
 };

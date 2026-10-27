@@ -183,6 +183,7 @@ void Messenger::login()
     m_status = "Завершите вход в браузере";
     emit changed();
     m_oauth.start(m_clientId.trimmed(), m_redirectUri.trimmed(), m_scope.trimmed());
+    emit changed();
 }
 
 void Messenger::acceptSession(QJsonObject session)

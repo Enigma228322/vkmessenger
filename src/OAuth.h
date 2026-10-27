@@ -15,6 +15,7 @@ public:
     void complete(const QString &callback);
     void refresh(const QJsonObject &session);
     void cancel();
+    bool awaitingCallback() const { return !m_state.isEmpty(); }
     static QString randomString();
     static QString challenge(const QString &verifier);
     static bool sameRedirect(const QUrl &actual, const QUrl &expected);

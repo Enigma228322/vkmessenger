@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QClipboard>
 #include <QUrlQuery>
+#include <algorithm>
 
 namespace {
 QString identifier(const QJsonValue &value) { return LongPoll::cursor(value); }
@@ -19,7 +20,7 @@ bool isPerson(const QString &value) { bool ok; auto id = value.toLongLong(&ok); 
 ActionController::ActionController(Messenger *messenger) : QObject(messenger), m_messenger(messenger) {}
 void ActionController::cancelPending() { ++m_generation; m_busy = false; emit changed(); }
 
-void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; emit changed(); }
+void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_searchQuery.clear(); m_searchPeer.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; emit changed(); }
 
 void ActionController::invoke(const QString &method, Form parameters, Callback callback, bool refresh)
 {
@@ -169,22 +170,31 @@ void ActionController::messageResults(const QJsonValue &value, bool append)
     for (auto p : response.value("groups").toArray()) peers[QString::number(-p.toObject().value("id").toInteger())] = p.toObject();
     for (auto v : response.value("items").toArray()) {
         auto msg = v.toObject();
-        m_results.append(QVariantMap{{"peer", identifier(msg.value("peer_id"))}, {"cmid", identifier(msg.value("conversation_message_id"))},
-            {"title", displayName(peers.value(identifier(msg.value("from_id"))))}, {"text", msg.value("text").toString()}, {"attachments", safeJson(msg.value("attachments"))}});
+        const auto peer = identifier(msg.value("peer_id")), cmid = identifier(msg.value("conversation_message_id"));
+        const QVariantMap row{{"peer", peer}, {"cmid", cmid},
+            {"title", displayName(peers.value(identifier(msg.value("from_id"))))}, {"text", msg.value("text").toString()}, {"attachments", safeJson(msg.value("attachments"))}};
+        auto existing = std::find_if(m_results.begin(), m_results.end(), [&peer, &cmid](const QVariant &item) {
+            const auto map = item.toMap(); return !cmid.isEmpty() && map.value("peer").toString() == peer && map.value("cmid").toString() == cmid;
+        });
+        if (existing == m_results.end()) m_results.append(row); else *existing = row;
     }
     m_hasMore = response.value("items").toArray().size() >= 50;
 }
 void ActionController::search(const QString &query, const QString &peer, bool nextPage)
 {
-    if (query.trimmed().isEmpty()) return;
-    if (nextPage && m_busy) return;
-    if (!nextPage) reset();
+    if (query.trimmed().isEmpty()) { reset(); return; }
+    if (nextPage && (m_busy || !m_hasMore)) return;
+    if (nextPage && (query != m_searchQuery || peer != m_searchPeer)) nextPage = false;
+    if (!nextPage) { reset(); m_searchQuery = query; m_searchPeer = peer; }
     const auto generation = m_generation;
     const int offset = nextPage ? m_offset + 50 : 0;
     const bool offline = m_messenger->offline();
+    // Local and server offsets belong to different result sets. Start over on a
+    // connectivity change, and never append a local page to server results.
+    if (nextPage && m_cachedResults != offline) { search(query, peer, false); return; }
     const auto serverFinished = std::make_shared<bool>(false);
     if (offline) { m_busy = true; emit changed(); }
-    m_messenger->m_store.searchMessages(m_messenger->m_account, query, peer, offset,
+    if (offline || !nextPage) m_messenger->m_store.searchMessages(m_messenger->m_account, query, peer, offset,
         [this, generation, offset, nextPage, offline, serverFinished](const QJsonObject &value, const QString &error) {
         if (generation != m_generation || *serverFinished) return;
         if (offline) m_busy = false;

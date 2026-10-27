@@ -119,6 +119,7 @@ class Messenger : public QObject {
     Q_PROPERTY(bool canManageChat READ canManageChat NOTIFY changed)
     Q_PROPERTY(bool apiInspectorEnabled READ apiInspectorEnabled CONSTANT)
     Q_PROPERTY(bool loginConfigured READ loginConfigured NOTIFY changed)
+    Q_PROPERTY(bool browserLoginPending READ browserLoginPending NOTIFY changed)
     Q_PROPERTY(bool darkTheme READ darkTheme WRITE setDarkTheme NOTIFY changed)
     Q_PROPERTY(bool flatMessages READ flatMessages WRITE setFlatMessages NOTIFY changed)
     Q_PROPERTY(bool reduceMotion READ reduceMotion WRITE setReduceMotion NOTIFY changed)
@@ -145,6 +146,7 @@ public:
     QString status() const { return m_demo ? "Деморежим · локальные сообщения" : m_offline ? "Нет сети · сохранённые переписки" : m_status; }
     bool offline() const { return m_offline; }
     bool loginConfigured() const { return !m_clientId.isEmpty(); }
+    bool browserLoginPending() const { return m_authorizing && m_oauth.awaitingCallback(); }
     int outgoingCount() const { return m_outgoing.size(); }
     bool darkTheme() const { return m_settings.value("ui/darkTheme", true).toBool(); }
     bool flatMessages() const { return m_settings.value("ui/flatMessages", true).toBool(); }
@@ -185,7 +187,7 @@ public:
     void applyLongPoll(const QJsonArray &events);
     Q_INVOKABLE void login();
     Q_INVOKABLE void loginWithToken(const QString &token, const QString &group = {});
-    Q_INVOKABLE void completeLogin(const QString &callback) { m_oauth.complete(callback); }
+    Q_INVOKABLE void completeLogin(const QString &callback) { m_oauth.complete(callback); emit changed(); }
     Q_INVOKABLE void startDemo();
     Q_INVOKABLE void logout();
     Q_INVOKABLE void selectConversation(const QString &peer, const QString &title);

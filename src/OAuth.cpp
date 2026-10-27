@@ -101,6 +101,12 @@ void OAuth::start(const QString &clientId, const QString &redirect, const QStrin
     QUrlQuery query;
     query.addQueryItem("response_type", "code");
     query.addQueryItem("client_id", clientId);
+    // VK ID's authorize page also consumes app_id and frontend compatibility
+    // metadata; mirror VKCOM/vkid-web-sdk 2.6.1 utils/url::getVKIDUrl.
+    // This is a native implementation, not an embedded JavaScript SDK.
+    query.addQueryItem("app_id", clientId);
+    query.addQueryItem("sdk_type", "vkid");
+    query.addQueryItem("v", "2.6.1");
     query.addQueryItem("redirect_uri", redirect);
     query.addQueryItem("state", m_state);
     query.addQueryItem("code_challenge", challenge(m_verifier));
