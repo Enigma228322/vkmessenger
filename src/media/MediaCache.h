@@ -46,7 +46,7 @@ private:
     QSet<QUrl> m_waiting;
     QHash<QUrl, QString> m_errors;
     QHash<QString, Entry> m_entries;
-    QSet<QString> m_accessed;
+    QHash<QString, qint64> m_accessed;
     qint64 m_bytes = 0, m_limit = 1073741824;
     quint64 m_generation = 0;
     int m_revision = 0;

@@ -15,11 +15,13 @@ public:
     explicit OAuth(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr);
     ~OAuth() override { cancel(); }
     void start(const QString &clientId, const QString &redirect, const QString &scope);
+    void startApi(const QString &clientId);
     bool complete(const QString &callback);
     bool completeAppCallback(const QUrl &callback);
     void refresh(const QJsonObject &session);
     void cancel();
     bool awaitingCallback() const { return !m_state.isEmpty(); }
+    bool apiLogin() const { return m_apiLogin; }
     static QString randomString();
     static QString challenge(const QString &verifier);
     static bool sameRedirect(const QUrl &actual, const QUrl &expected);
@@ -31,6 +33,7 @@ signals:
 private slots:
     void expire();
 private:
+    bool completeApi(const QUrl &callback);
     void exchange(Form parameters, const QString &expectedState);
     QNetworkAccessManager m_defaultNetwork;
     QNetworkAccessManager *m_network;
@@ -41,5 +44,6 @@ private:
     QString m_clientId, m_redirect, m_state, m_verifier;
     QString m_consumedState;
     bool m_exchanging = false;
+    bool m_apiLogin = false;
     quint64 m_generation = 0;
 };

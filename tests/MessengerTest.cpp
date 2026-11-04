@@ -16,6 +16,8 @@
 #include <QUrlQuery>
 #include <QJSValue>
 #include <QBuffer>
+#include <QAbstractItemModelTester>
+#include <QElapsedTimer>
 #include <QImageReader>
 #include <QPainter>
 #include <QStandardPaths>
@@ -94,6 +96,20 @@ public slots:
     void capture(const QUrl &value) { url = value; }
 };
 
+static QUrl startApiLogin(Messenger &messenger)
+{
+    LoginBrowserCapture browser;
+    QDesktopServices::setUrlHandler("https", &browser, "capture");
+    messenger.loginApi();
+    QDesktopServices::unsetUrlHandler("https");
+    return browser.url;
+}
+
+static QString apiLoginReturn(const QUrl &authorize, const QString &parameters = "access_token=fixture%2Btoken%2F%252B%3D%3D&user_id=42&expires_in=3600")
+{
+    return "https://oauth.vk.com/blank.html#state=" + QUrlQuery(authorize).queryItemValue("state") + "&" + parameters;
+}
+
 class MessengerTest : public QObject {
     Q_OBJECT
     QTemporaryDir m_storage;
@@ -153,6 +169,179 @@ private slots:
         QCOMPARE(field->property("text").toString(), QString());
         QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
         QVERIFY(!messenger.authorizing()); QVERIFY(!messenger.browserLoginPending());
+    }
+
+    void apiLoginVerifiesIdentityBeforeSavingAndAcceptsCallbackOnce()
+    {
+        TokenNetwork network; network.response.clear();
+        Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto root = engine.rootObjects().first();
+        auto button = root->findChild<QObject *>("vkApiLoginButton"); QVERIFY(button);
+        QVERIFY(root->findChild<QObject *>("settingsVkApiLoginButton"));
+        LoginBrowserCapture browser; QDesktopServices::setUrlHandler("https", &browser, "capture");
+        const bool clicked = QMetaObject::invokeMethod(button, "clicked");
+        QDesktopServices::unsetUrlHandler("https"); QVERIFY(clicked);
+        QVERIFY(messenger.browserLoginPending()); QVERIFY(messenger.browserLoginUsesToken());
+        QCOMPARE(browser.url.host(), "oauth.vk.com"); QCOMPARE(browser.url.path(), "/authorize");
+        const QUrlQuery query(browser.url);
+        QCOMPARE(query.queryItemValue("client_id"), "54850913");
+        QCOMPARE(query.queryItemValue("response_type"), "token");
+        QCOMPARE(query.queryItemValue("scope"), "messages");
+        QCOMPARE(query.queryItemValue("redirect_uri", QUrl::FullyDecoded), "https://oauth.vk.com/blank.html");
+        QVERIFY(!query.queryItemValue("state").isEmpty());
+        QVERIFY(!query.hasQueryItem("client_secret")); QVERIFY(!query.hasQueryItem("code_challenge"));
+        auto dialog = root->findChild<QObject *>("vkIdReturnDialog"); QVERIFY(dialog);
+        auto field = root->findChild<QObject *>("vkIdReturnInput"); QVERIFY(field);
+        auto submit = root->findChild<QObject *>("vkIdReturnSubmit"); QVERIFY(submit);
+        QTRY_VERIFY(dialog->property("visible").toBool()); QVERIFY(field->property("visible").toBool());
+        QCOMPARE(field->property("echoMode").toInt(), 2);
+        const auto callback = apiLoginReturn(browser.url);
+        field->setProperty("text", callback);
+        QVERIFY(QMetaObject::invokeMethod(submit, "clicked"));
+        QCOMPARE(field->property("text").toString(), QString());
+        QTRY_COMPARE(network.replies["users.get"].size(), 1);
+        QVERIFY(!messenger.connected()); QVERIFY(savedSession.isEmpty());
+        QVERIFY(messenger.authorizing()); QVERIFY(!messenger.browserLoginPending());
+        QVERIFY(dialog->property("visible").toBool());
+        messenger.completeLogin(callback);
+        QCOMPARE(network.replies["users.get"].size(), 1);
+        QCOMPARE(QUrlQuery(QString::fromUtf8(network.requests.first().second)).queryItemValue("access_token", QUrl::FullyDecoded), "fixture+token/%2B==");
+        network.replies["users.get"][0]->deliver(R"({"response":[{"id":42}]})");
+        QTRY_VERIFY(messenger.connected()); QTRY_VERIFY(!dialog->property("visible").toBool());
+        const auto saved = QJsonDocument::fromJson(savedSession).object();
+        QCOMPARE(saved.value("auth_type").toString(), "oauth_api");
+        QCOMPARE(saved.value("client_id").toString(), "54850913");
+        QCOMPARE(saved.value("user_id").toInteger(), 42);
+        QCOMPARE(saved.value("access_token").toString(), "fixture+token/%2B==");
+        QVERIFY(saved.value("expires_at").toInteger() > QDateTime::currentSecsSinceEpoch() + 3500);
+        QVERIFY(!saved.contains("refresh_token"));
+        messenger.completeLogin(callback);
+        QCOMPARE(network.replies["users.get"].size(), 1);
+        QVERIFY(network.replies["auth"].isEmpty());
+    }
+
+    void apiLoginRejectsMalformedCallbackWithoutLosingAttempt_data()
+    {
+        QTest::addColumn<QString>("address");
+        const QString base = "https://oauth.vk.com/blank.html";
+        const QString fragment = "#state=STATE&access_token=fixture&user_id=42&expires_in=3600";
+        QTest::newRow("wrong-host") << "https://example.test/blank.html" + fragment;
+        QTest::newRow("http") << "http://oauth.vk.com/blank.html" + fragment;
+        QTest::newRow("userinfo") << "https://user@oauth.vk.com/blank.html" + fragment;
+        QTest::newRow("port") << "https://oauth.vk.com:443/blank.html" + fragment;
+        QTest::newRow("path") << "https://oauth.vk.com/other" + fragment;
+        QTest::newRow("query") << base + "?token=fixture" + fragment;
+        QTest::newRow("no-fragment") << base + "?state=STATE&access_token=fixture&user_id=42&expires_in=3600";
+        QTest::newRow("wrong-state") << base + "#state=other&access_token=fixture&user_id=42&expires_in=3600";
+        QTest::newRow("duplicate-state") << base + fragment + "&state=STATE";
+        QTest::newRow("duplicate-token") << base + fragment + "&access_token=other";
+        QTest::newRow("duplicate-user") << base + fragment + "&user_id=42";
+        QTest::newRow("duplicate-expiry") << base + fragment + "&expires_in=3600";
+        QTest::newRow("mixed-error") << base + fragment + "&error=access_denied";
+        QTest::newRow("missing-token") << base + "#state=STATE&user_id=42&expires_in=3600";
+        QTest::newRow("token-control") << base + "#state=STATE&access_token=fixture%00&user_id=42&expires_in=3600";
+        QTest::newRow("bad-user") << base + "#state=STATE&access_token=fixture&user_id=-1&expires_in=3600";
+        QTest::newRow("missing-expiry") << base + "#state=STATE&access_token=fixture&user_id=42";
+        QTest::newRow("negative-expiry") << base + "#state=STATE&access_token=fixture&user_id=42&expires_in=-1";
+        QTest::newRow("overflow-expiry") << base + "#state=STATE&access_token=fixture&user_id=42&expires_in=9223372036854775807";
+    }
+
+    void apiLoginRejectsMalformedCallbackWithoutLosingAttempt()
+    {
+        QFETCH(QString, address);
+        TokenNetwork network; Messenger messenger(nullptr, &network);
+        const auto authorize = startApiLogin(messenger);
+        address.replace("STATE", QUrlQuery(authorize).queryItemValue("state"));
+        messenger.completeLogin(address);
+        QVERIFY(messenger.browserLoginPending()); QVERIFY(!messenger.connected());
+        QVERIFY(!messenger.error().isEmpty()); QVERIFY(network.requests.isEmpty()); QVERIFY(savedSession.isEmpty());
+        messenger.completeLogin(apiLoginReturn(authorize));
+        QTRY_VERIFY(messenger.connected());
+    }
+
+    void apiLoginCancellationExpiryDenialAndSwitchingFlows()
+    {
+        TokenNetwork network; network.response.clear(); Messenger messenger(nullptr, &network);
+        auto callback = apiLoginReturn(startApiLogin(messenger));
+        messenger.logout(); messenger.completeLogin(callback);
+        QVERIFY(!messenger.connected()); QVERIFY(!messenger.authorizing()); QVERIFY(network.requests.isEmpty());
+        callback = apiLoginReturn(startApiLogin(messenger));
+        auto oauth = messenger.findChild<OAuth *>(); QVERIFY(oauth);
+        QVERIFY(QMetaObject::invokeMethod(oauth, "expire"));
+        messenger.completeLogin(callback); QVERIFY(!messenger.authorizing()); QVERIFY(network.requests.isEmpty());
+        const auto denied = startApiLogin(messenger);
+        messenger.completeLogin(apiLoginReturn(denied, "error=access_denied&error_description=secret-that-must-not-be-shown"));
+        QVERIFY(!messenger.authorizing()); QVERIFY(!messenger.error().contains("secret-that")); QVERIFY(savedSession.isEmpty());
+        callback = apiLoginReturn(startApiLogin(messenger));
+        LoginBrowserCapture browser; QDesktopServices::setUrlHandler("https", &browser, "capture");
+        messenger.login(); QDesktopServices::unsetUrlHandler("https");
+        messenger.completeLogin(callback); QVERIFY(messenger.browserLoginPending()); QVERIFY(!messenger.browserLoginUsesToken());
+        const auto pkceState = QUrlQuery(browser.url).queryItemValue("state");
+        const auto current = startApiLogin(messenger);
+        messenger.openDeepLink(QUrl("vkm://auth/callback?code=fixture&device_id=fixture&state=" + pkceState));
+        QVERIFY(messenger.browserLoginUsesToken()); QVERIFY(network.requests.isEmpty());
+        messenger.completeLogin(callback); QVERIFY(messenger.browserLoginPending()); QVERIFY(network.requests.isEmpty());
+        callback = apiLoginReturn(current);
+        messenger.completeLogin(callback); QTRY_COMPARE(network.replies["users.get"].size(), 1);
+        auto pending = network.replies["users.get"][0]; messenger.logout();
+        if (pending) pending->deliver(R"({"response":[{"id":42}]})");
+        QVERIFY(!messenger.connected()); QVERIFY(savedSession.isEmpty());
+        Messenger restarted(nullptr, &network, m_storage.path(), false);
+        restarted.completeLogin(callback); QVERIFY(!restarted.authorizing()); QVERIFY(!restarted.connected());
+        QVERIFY(network.replies["auth"].isEmpty());
+    }
+
+    void apiLoginDoesNotSaveUnverifiedIdentity_data()
+    {
+        QTest::addColumn<QByteArray>("response");
+        QTest::newRow("different-user") << QByteArray(R"({"response":[{"id":99}]})");
+        QTest::newRow("invalid-token") << QByteArray(R"({"error":{"error_code":5,"error_msg":"fixture-token"}})");
+        QTest::newRow("network-error") << QByteArray("#offline");
+    }
+
+    void apiLoginDoesNotSaveUnverifiedIdentity()
+    {
+        QFETCH(QByteArray, response);
+        TokenNetwork network; network.response = response; Messenger messenger(nullptr, &network);
+        messenger.completeLogin(apiLoginReturn(startApiLogin(messenger)));
+        QTRY_VERIFY(!messenger.authorizing()); QVERIFY(!messenger.connected()); QVERIFY(savedSession.isEmpty());
+        QVERIFY(!messenger.error().isEmpty()); QVERIFY(!messenger.error().contains("fixture-token"));
+        QVERIFY(network.replies["auth"].isEmpty()); QVERIFY(network.replies["messages.getDiff"].isEmpty());
+    }
+
+    void apiLoginRestoresWithoutVkIdRefreshAndHonorsExpiry_data()
+    {
+        QTest::addColumn<qint64>("remaining");
+        QTest::newRow("valid") << qint64(3600);
+        QTest::newRow("no-expiry") << qint64(0);
+        QTest::newRow("expired") << qint64(-1);
+        QTest::newRow("expires-while-open") << qint64(3);
+    }
+
+    void apiLoginRestoresWithoutVkIdRefreshAndHonorsExpiry()
+    {
+        QFETCH(qint64, remaining);
+        const auto expires = remaining == 0 ? 0 : QDateTime::currentSecsSinceEpoch() + remaining;
+        savedSession = QJsonDocument(QJsonObject{{"auth_type", "oauth_api"}, {"access_token", "fixture-token"},
+            {"user_id", 42}, {"client_id", "54850913"}, {"expires_at", expires}}).toJson();
+        TokenNetwork network; Messenger messenger(nullptr, &network);
+        if (remaining < 0) {
+            QTRY_VERIFY(!messenger.error().isEmpty());
+            QVERIFY(!messenger.connected()); QVERIFY(savedSession.isEmpty()); QVERIFY(network.requests.isEmpty());
+        } else {
+            QTRY_VERIFY(messenger.connected());
+            QCOMPARE(network.replies["users.get"].size(), 1);
+            const auto saved = QJsonDocument::fromJson(savedSession).object();
+            QCOMPARE(saved.value("auth_type").toString(), "oauth_api");
+            QCOMPARE(saved.value("expires_at").toInteger(), expires);
+            if (remaining == 3) {
+                QTRY_VERIFY_WITH_TIMEOUT(!messenger.connected(), 5000);
+                QVERIFY(savedSession.isEmpty()); QVERIFY(messenger.error().contains("истёк"));
+            }
+        }
+        QVERIFY(network.replies["auth"].isEmpty());
     }
 
     void appCallbackCompletesOnceThroughFileOpenEventAndKeepsHttpsRedirect()
@@ -702,6 +891,83 @@ private slots:
         QTRY_VERIFY(!button->property("visible").toBool());
     }
 
+    void conversationFilterTracksLiveChanges()
+    {
+        Messenger messenger;
+        auto source = messenger.conversations();
+        auto filtered = messenger.filteredConversations();
+        QAbstractItemModelTester tester(filtered, QAbstractItemModelTester::FailureReportingMode::QtTest);
+        QVariantList rows{
+            QVariantMap{{"id", "1"}, {"peer", "1"}, {"title", "Анна"}, {"pinned", true}, {"important", true}},
+            QVariantMap{{"id", "2"}, {"peer", "2"}, {"title", "Работа"}, {"pinned", true}, {"unread", 2}},
+            QVariantMap{{"id", "3"}, {"peer", "3"}, {"title", "Анна — работа"}, {"markedUnread", true}, {"important", true}},
+            QVariantMap{{"id", "4"}, {"peer", "4"}, {"title", "Архив"}, {"archived", true}, {"unread", 1}},
+            QVariantMap{{"id", "5"}, {"peer", "5"}, {"title", "Друзья"}}
+        };
+        source->replace(rows);
+        QCoreApplication::processEvents();
+        QSignalSpy unnecessaryUpdates(filtered, &ConversationFilterModel::changed);
+        messenger.folders()->conversationsChanged();
+        QCoreApplication::processEvents();
+        QCOMPARE(unnecessaryUpdates.count(), 0);
+        QCOMPARE(filtered->rowCount(), 4);
+        QCOMPARE(filtered->pinnedBoundaryPeer(), "3");
+        filtered->setQuery("  АННА  ");
+        QCOMPARE(filtered->rowCount(), 2);
+        QCOMPARE(filtered->get(0).value("peer").toString(), "1");
+        filtered->setUnreadOnly(true);
+        QCOMPARE(filtered->rowCount(), 1);
+        QCOMPARE(filtered->get(0).value("peer").toString(), "3");
+        QVERIFY(filtered->pinnedBoundaryPeer().isEmpty());
+        filtered->setCategory(2);
+        auto first = rows[0].toMap(); first.insert("unread", 4); rows[0] = first;
+        source->reconcile(rows);
+        QCOMPARE(filtered->rowCount(), 2);
+        QCOMPARE(filtered->pinnedBoundaryPeer(), "3");
+        first.insert("title", "Другое название"); rows[0] = first; source->reconcile(rows);
+        QCOMPARE(filtered->rowCount(), 1);
+        QCOMPARE(filtered->get(0).value("peer").toString(), "3");
+        first.insert("title", "Анна"); rows[0] = first; source->reconcile(rows);
+        QCOMPARE(filtered->rowCount(), 2);
+        std::reverse(rows.begin(), rows.end()); source->reconcile(rows);
+        QCOMPARE(filtered->get(0).value("peer").toString(), "3");
+        QCOMPARE(filtered->get(1).value("peer").toString(), "1");
+        filtered->setQuery(""); filtered->setCategory(3);
+        QCOMPARE(filtered->rowCount(), 1);
+        QCOMPARE(filtered->get(0).value("peer").toString(), "4");
+        source->replace({}); QCOMPARE(filtered->rowCount(), 0);
+        QVERIFY(filtered->get(-1).isEmpty()); QVERIFY(filtered->get(0).isEmpty());
+    }
+
+    void largeConversationListFiltersWithoutHiddenRows()
+    {
+        Messenger messenger;
+        messenger.startDemo();
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        auto chats = window->findChild<QQuickItem *>("conversationList"); QVERIFY(chats);
+        auto emptyState = window->findChild<QQuickItem *>("conversationEmptyState"); QVERIFY(emptyState);
+        window->setProperty("search", "переписка 9999");
+        QVariantList rows; rows.reserve(10000);
+        for (int i = 0; i < 10000; ++i) rows.append(QVariantMap{{"id", QString::number(i + 1)}, {"peer", QString::number(i + 1)}, {"title", QString("Переписка %1").arg(i)}, {"preview", ""}, {"time", ""}});
+        QElapsedTimer timer; timer.start();
+        messenger.conversations()->replace(rows);
+        QTRY_COMPARE(chats->property("count").toInt(), 1);
+        QCOMPARE(messenger.filteredConversations()->get(0).value("peer").toString(), "10000");
+        qInfo() << "10,000 conversations, filtered model ready in" << timer.elapsed() << "ms";
+        QTRY_VERIFY(chats->property("contentHeight").toReal() <= 66);
+        QVERIFY(!emptyState->isVisible());
+        window->setProperty("search", "Несуществующая переписка");
+        QTRY_COMPARE(chats->property("count").toInt(), 0);
+        QTRY_VERIFY(emptyState->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(window, "resetConversationFilters"));
+        QTRY_COMPARE(chats->property("count").toInt(), 10000);
+        QTRY_VERIFY(!emptyState->isVisible());
+        const auto content = chats->property("contentItem").value<QQuickItem *>(); QVERIFY(content);
+        QTRY_VERIFY(content->childItems().size() < 50);
+    }
+
     void pinnedPreviewAndFilteredConversationBoundary()
     {
         TokenNetwork network;
@@ -872,7 +1138,7 @@ private slots:
     {
         TokenNetwork network;
         network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":2000000077},"chat_settings":{"title":"Тестовая беседа"}},"message":[]}]}})"};
-        network.responses["messages.getConversationMembers"] = {R"({"response":{"count":1,"items":[{"member_id":42}],"profiles":[{"id":42,"first_name":"Тестовый","last_name":"Участник"}]}})"};
+        network.responses["messages.getConversationMembers"] = {R"({"response":{"count":1,"items":[{"member_id":42,"is_admin":true}],"profiles":[{"id":42,"first_name":"Тестовый","last_name":"Участник","online":1,"last_seen":{"time":1700000000}}]}})"};
         network.responses["messages.getHistoryAttachments"] = {R"({"response":{"items":[]}})"};
         Messenger messenger(nullptr, &network);
         QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
@@ -886,6 +1152,10 @@ private slots:
         QTRY_VERIFY(profile->property("opened").toBool());
         QTRY_COMPARE(messenger.profileActions()->results().size(), 1);
         QCOMPARE(messenger.profileActions()->results().first().toMap().value("title").toString(), QString("Тестовый Участник"));
+        QCOMPARE(messenger.profileActions()->memberCount(), 1);
+        QVERIFY(messenger.profileActions()->results().first().toMap().value("online").toBool());
+        QVERIFY(messenger.profileActions()->results().first().toMap().value("is_admin").toBool());
+        QCOMPARE(messenger.profileActions()->results().first().toMap().value("last_seen").toMap().value("time").toLongLong(), 1700000000LL);
         if (qEnvironmentVariableIsSet("VKM_PROFILE_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_PROFILE_SCREENSHOT")));
         messenger.actions()->reset();
         QCOMPARE(messenger.profileActions()->results().size(), 1);
@@ -894,10 +1164,111 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(profile, "loadSection"));
         QTRY_VERIFY(!messenger.profileActions()->busy());
         QCOMPARE(messenger.profileActions()->results().size(), 0);
+        QCOMPARE(profile->property("memberCount").toInt(), 1);
         QVERIFY(QMetaObject::invokeMethod(profile, "close"));
         QTRY_VERIFY(!profile->property("opened").toBool());
         QCOMPARE(messenger.selectedPeer(), QString("2000000077"));
         QCOMPARE(messenger.draftText(), QString("Несохранённый ввод"));
+    }
+
+    void personalProfileShowsIdentityAndClosesOnPeerChange()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"push_settings":{"disabled_forever":true}},"message":[]}],"profiles":[{"id":77,"first_name":"Анна","last_name":"Тест","domain":"anna_test","last_seen":{"time":1700000000}}]}})"};
+        network.responses["messages.getHistoryAttachments"] = {R"({"response":{"items":[{"cmid":3,"attachment":{"type":"photo","photo":{"id":1,"owner_id":77,"sizes":[]}}},{"cmid":4,"attachment":{"type":"photo","photo":{"id":2,"owner_id":77,"sizes":[]}}}]}})"};
+        Messenger messenger(nullptr, &network);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.loginWithToken("test-token"); QTRY_VERIFY(messenger.connected());
+        messenger.selectConversation("77", "Анна Тест");
+        QTRY_COMPARE(messenger.conversationProfile().value("domain").toString(), QString("anna_test"));
+        QVERIFY(messenger.conversationProfile().value("muted").toBool());
+        messenger.setDraftText("77", "Черновик");
+        auto profile = window->findChild<QObject *>("conversationProfile"); QVERIFY(profile);
+        QVERIFY(QMetaObject::invokeMethod(profile, "present", Q_ARG(QVariant, QVariant::fromValue(window->contentItem()))));
+        QTRY_VERIFY(profile->property("opened").toBool());
+        QCOMPARE(profile->property("section").toInt(), 1);
+        QVERIFY(!profile->property("chat").toBool());
+        QTRY_COMPARE(messenger.profileActions()->results().size(), 2);
+        if (qEnvironmentVariableIsSet("VKM_PERSONAL_PROFILE_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_PERSONAL_PROFILE_SCREENSHOT")));
+        QCOMPARE(messenger.draftText(), QString("Черновик"));
+        messenger.selectConversation("88", "Другой собеседник");
+        QTRY_VERIFY(!profile->property("opened").toBool());
+        QTRY_VERIFY(messenger.profileActions()->results().isEmpty());
+    }
+
+    void menusStayReadableInBothThemes()
+    {
+        Messenger messenger;
+        const bool previousDark = messenger.darkTheme();
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH)));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.startDemo(); window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        auto menu = window->findChild<QObject *>("navigationMenu"); QVERIFY(menu);
+        for (bool dark : {true, false}) {
+            messenger.setDarkTheme(dark);
+            QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+            QTRY_VERIFY(menu->property("opened").toBool());
+            auto content = menu->property("contentItem").value<QQuickItem *>(); QVERIFY(content);
+            auto listContent = content->property("contentItem").value<QQuickItem *>(); QVERIFY(listContent);
+            QList<QQuickItem *> entries;
+            for (auto item : listContent->childItems()) if (item->property("text").isValid()) entries.append(item);
+            QCOMPARE(entries.size(), 5);
+            auto item = entries.at(1);
+            const auto center = item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+            QTest::mouseMove(window, center);
+            QTRY_VERIFY(item->property("highlighted").toBool());
+            auto background = item->property("background").value<QQuickItem *>(); QVERIFY(background);
+            QTRY_COMPARE(background->property("color").value<QColor>(), QColor(dark ? "#2c2c2c" : "#f0f2f5"));
+            auto label = item->property("contentItem").value<QQuickItem *>(); QVERIFY(label);
+            QCOMPARE(label->property("color").value<QColor>(), QColor(dark ? "#e1e3e6" : "#222222"));
+            if (qEnvironmentVariableIsSet("VKM_MENU_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_MENU_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
+            QTest::keyClick(window, Qt::Key_Down);
+            QCOMPARE(menu->property("currentIndex").toInt(), 2);
+            QTest::keyClick(window, Qt::Key_Escape);
+            QTRY_VERIFY(!menu->property("visible").toBool());
+        }
+        messenger.setDarkTheme(previousDark);
+    }
+
+    void conversationHoverFollowsPointerWithoutSelecting()
+    {
+        Messenger messenger;
+        const bool reducedMotion = messenger.reduceMotion();
+        messenger.setReduceMotion(false);
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH)));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        messenger.startDemo();
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        auto chats = window->findChild<QQuickItem *>("conversationList"); QVERIFY(chats);
+        auto highlight = window->findChild<QQuickItem *>("conversationHover"); QVERIFY(highlight);
+        const auto point = [&](int row) { return chats->mapToScene(QPointF(chats->width() / 2, row * 66 + 33)).toPoint(); };
+        QTest::mouseMove(window, point(1));
+        QTRY_COMPARE(highlight->opacity(), 1.0);
+        QTRY_COMPARE(highlight->y(), 66.0);
+        QTest::mouseMove(window, point(3));
+        QTest::qWait(40);
+        QVERIFY(highlight->y() > 66.0 && highlight->y() < 198.0);
+        // Reverse direction before the first transition finishes.
+        QTest::mouseMove(window, point(2));
+        QTRY_COMPARE(highlight->y(), 132.0);
+        if (qEnvironmentVariableIsSet("VKM_HOVER_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_HOVER_SCREENSHOT")));
+        QCOMPARE(messenger.selectedPeer(), QString("1"));
+        messenger.setReduceMotion(true);
+        QTest::mouseMove(window, point(1));
+        QCOMPARE(highlight->y(), 66.0);
+        QTest::mouseMove(window, QPoint(window->width() - 10, 100));
+        QCOMPARE(highlight->opacity(), 0.0);
+        messenger.setReduceMotion(reducedMotion);
     }
 
     void uiMessageGeometry()
@@ -974,6 +1345,184 @@ private slots:
         if (qEnvironmentVariableIsSet("VKM_SCREENSHOT")) {
             QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_SCREENSHOT")));
         }
+    }
+
+    void conversationHeaderShowsCurrentAvatarAndTracksUpdates()
+    {
+        QImage image(32, 32, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::blue);
+        QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+        TokenNetwork network;
+        network.responses["header-first"] = {png}; network.responses["header-second"] = {png}; network.responses["header-updated"] = {png};
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        auto rows = messenger.conversations()->rows;
+        for (int i = 0; i < rows.size(); ++i) {
+            auto row = rows[i].toMap(); row.insert("id", row.value("peer"));
+            if (i < 2) row.insert("avatar", i == 0 ? "https://assets.test/header-first" : "https://assets.test/header-second");
+            rows[i] = row;
+        }
+        messenger.conversations()->reconcile(rows);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto root = engine.rootObjects().first();
+        auto avatar = root->findChild<QObject *>("conversationHeaderAvatar"); QVERIFY(avatar);
+        auto picture = avatar->findChild<QObject *>("avatarImage"); QVERIFY(picture);
+        QCOMPARE(avatar->property("source").toString(), "https://assets.test/header-first");
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        QVERIFY(picture->property("visible").toBool());
+
+        messenger.selectConversation("2", "Анна Смирнова");
+        QCOMPARE(avatar->property("source").toString(), "https://assets.test/header-second");
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        QCOMPARE(picture->property("source").toUrl(), messenger.media()->cached(QUrl("https://assets.test/header-second")));
+
+        auto updated = rows[1].toMap(); updated.insert("avatar", "https://assets.test/header-updated"); rows[1] = updated;
+        std::reverse(rows.begin(), rows.end());
+        messenger.conversations()->reconcile(rows); // model change without Messenger::changed
+        QCOMPARE(avatar->property("source").toString(), "https://assets.test/header-updated");
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        QCOMPARE(picture->property("source").toUrl(), messenger.media()->cached(QUrl("https://assets.test/header-updated")));
+
+        messenger.selectConversation("3", "Дизайн и интерфейсы");
+        QVERIFY(avatar->property("source").toString().isEmpty());
+        QTRY_VERIFY(picture->property("source").toUrl().isEmpty());
+        QVERIFY(!picture->property("visible").toBool());
+        QCOMPARE(avatar->property("name").toString(), "Дизайн и интерфейсы");
+        messenger.selectConversation("missing", "Новая переписка");
+        QVERIFY(avatar->property("source").toString().isEmpty());
+    }
+
+    void photoGalleryOpensClickedPhotoAndNavigates()
+    {
+        QImage image(32, 32, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::green);
+        QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+        TokenNetwork network;
+        network.responses["gallery-first"] = {png}; network.responses["gallery-second"] = {png};
+        network.responses["gallery-third"] = {"#offline"};
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QFile fixture(QFINDTESTDATA("fixtures/photo-gallery.json")); QVERIFY(fixture.open(QIODevice::ReadOnly));
+        const auto attachments = safeJson(QJsonDocument::fromJson(fixture.readAll()).array()).toList();
+        auto message = messenger.messages()->get(0); message.insert("attachments", attachments);
+        messenger.messages()->replace({message});
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        const auto openButtons = [window]() {
+            QList<QQuickItem *> items;
+            const auto visit = [&](auto &&self, QQuickItem *item) -> void {
+                if (item->objectName() == "attachmentOpen") items.append(item);
+                for (auto child : item->childItems()) self(self, child);
+            };
+            visit(visit, window->contentItem()); return items;
+        };
+        QTRY_COMPARE(openButtons().size(), 5);
+        QSignalSpy galleryRequested(messenger.actions(), &ActionController::photoGalleryRequested);
+        QVERIFY(QMetaObject::invokeMethod(openButtons()[3], "clicked"));
+        QCOMPARE(galleryRequested.size(), 1);
+        QCOMPARE(galleryRequested.first()[0].toList().size(), 3);
+        QCOMPARE(galleryRequested.first()[1].toInt(), 1);
+        auto viewer = window->findChild<QObject *>("mediaViewer"); QVERIFY(viewer);
+        auto previous = viewer->findChild<QObject *>("viewerPrevious"); QVERIFY(previous);
+        auto next = viewer->findChild<QObject *>("viewerNext"); QVERIFY(next);
+        auto count = viewer->findChild<QObject *>("viewerPhotoCount"); QVERIFY(count);
+        auto photo = viewer->findChild<QObject *>("viewerPhotograph"); QVERIFY(photo);
+        auto error = viewer->findChild<QObject *>("viewerError"); QVERIFY(error);
+        QTRY_VERIFY(viewer->property("opened").toBool());
+        QTRY_COMPARE(photo->property("status").toInt(), 1);
+        QCOMPARE(viewer->property("remote").toUrl(), QUrl("https://assets.test/gallery-second"));
+        QCOMPARE(count->property("text").toString(), "2 из 3");
+        QCOMPARE(viewer->property("title").toString(), "Второе фото");
+
+        viewer->setProperty("zoom", 3);
+        QVERIFY(QMetaObject::invokeMethod(previous, "clicked"));
+        QCOMPARE(viewer->property("remote").toUrl(), QUrl("https://assets.test/gallery-first"));
+        QCOMPARE(count->property("text").toString(), "1 из 3");
+        QCOMPARE(viewer->property("zoom").toReal(), 1.0);
+        QVERIFY(!previous->property("enabled").toBool());
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(viewer->property("currentIndex").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(viewer->property("currentIndex").toInt(), 1);
+        QVERIFY(QMetaObject::invokeMethod(next, "clicked"));
+        QCOMPARE(viewer->property("remote").toUrl(), QUrl("https://assets.test/gallery-third"));
+        QCOMPARE(count->property("text").toString(), "3 из 3");
+        QVERIFY(!next->property("enabled").toBool());
+        QTRY_VERIFY(error->property("visible").toBool());
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(viewer->property("currentIndex").toInt(), 2);
+        QVERIFY(QMetaObject::invokeMethod(previous, "clicked"));
+        QTRY_COMPARE(photo->property("status").toInt(), 1);
+        QVERIFY(!error->property("visible").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(viewer, "close"));
+        QTRY_VERIFY(!viewer->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(window, "presentMedia", Q_ARG(QVariant, "https://assets.test/gallery-first"), Q_ARG(QVariant, "photo"), Q_ARG(QVariant, "Одиночное фото")));
+        QTRY_COMPARE(photo->property("status").toInt(), 1);
+        QVERIFY(!previous->property("visible").toBool()); QVERIFY(!next->property("visible").toBool());
+        QCOMPARE(viewer->property("currentIndex").toInt(), 0);
+    }
+
+    void photoViewerRecoversFromNetworkAndDecodeErrors()
+    {
+        TokenNetwork network;
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto root = engine.rootObjects().first();
+        const auto present = [&](const QString &url) {
+            return QMetaObject::invokeMethod(root, "presentMedia", Q_ARG(QVariant, url), Q_ARG(QVariant, "photo"), Q_ARG(QVariant, "Фотография"));
+        };
+        QVERIFY(present("https://assets.test/viewer-photo"));
+        auto viewer = root->findChild<QObject *>("mediaViewer"); QVERIFY(viewer);
+        auto loading = viewer->findChild<QObject *>("viewerLoading"); QVERIFY(loading);
+        auto error = viewer->findChild<QObject *>("viewerError"); QVERIFY(error);
+        auto retry = viewer->findChild<QObject *>("viewerRetry"); QVERIFY(retry);
+        auto photo = viewer->findChild<QObject *>("viewerPhotograph"); QVERIFY(photo);
+        auto flick = viewer->findChild<QObject *>("photoFlick"); QVERIFY(flick);
+        QTRY_COMPARE(network.replies["viewer-photo"].size(), 1);
+        QVERIFY(loading->property("running").toBool());
+        network.replies["viewer-photo"].first()->deliver("#offline");
+        QTRY_VERIFY(error->property("visible").toBool());
+        QVERIFY(!loading->property("running").toBool());
+        QVERIFY(retry->property("visible").toBool());
+
+        network.responses["viewer-photo"] = {"invalid-image"};
+        QVERIFY(QMetaObject::invokeMethod(retry, "clicked"));
+        QTRY_COMPARE(photo->property("status").toInt(), 3); // Image.Error
+        QVERIFY(messenger.media()->error(QUrl("https://assets.test/viewer-photo")).isEmpty());
+        QVERIFY(error->property("visible").toBool());
+        QVERIFY(!loading->property("running").toBool());
+        QVERIFY(retry->property("visible").toBool());
+
+        QImage image(32, 32, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::blue);
+        QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+        network.responses["viewer-photo"] = {png};
+        QVERIFY(QMetaObject::invokeMethod(retry, "clicked"));
+        QTRY_COMPARE(photo->property("status").toInt(), 1); // Image.Ready, same cache path
+        QCOMPARE(network.replies["viewer-photo"].size(), 3);
+        QVERIFY(!error->property("visible").toBool());
+        QVERIFY(!retry->property("visible").toBool());
+        QVERIFY(!loading->property("running").toBool());
+
+        viewer->setProperty("zoom", 3);
+        QTRY_VERIFY(flick->property("contentWidth").toReal() > flick->property("width").toReal());
+        flick->setProperty("contentX", 100); flick->setProperty("contentY", 100);
+        QCOMPARE(flick->property("contentX").toReal(), 100.0);
+        QVERIFY(present("https://assets.test/next-photo"));
+        QCOMPARE(viewer->property("zoom").toReal(), 1.0);
+        QCOMPARE(flick->property("contentX").toReal(), 0.0);
+        QCOMPARE(flick->property("contentY").toReal(), 0.0);
+        QTRY_VERIFY(loading->property("running").toBool());
+        QVERIFY(QMetaObject::invokeMethod(viewer, "close"));
+        QTRY_VERIFY(!viewer->property("visible").toBool());
+        QVERIFY(!loading->property("running").toBool());
+
+        QVERIFY(present("https://assets.test/viewer-photo"));
+        QTRY_COMPARE(photo->property("status").toInt(), 1);
+        QCOMPARE(network.replies["viewer-photo"].size(), 3); // reopen from disk without a new download
+        QVERIFY(present(""));
+        QTRY_VERIFY(error->property("visible").toBool());
+        QVERIFY(!loading->property("running").toBool());
+        QVERIFY(!retry->property("visible").toBool());
     }
 
     void reactionCatalogAndImagesRenderInMessagesAndPicker()
@@ -1168,6 +1717,13 @@ private slots:
             QVERIFY(!folders->contains("1", "88")); // exclusion wins over explicit inclusion
             QVERIFY(folders->contains("2", "88"));
             QVERIFY(!folders->get("1").value("editable").toBool());
+            folders->setSelected("1");
+            QCOMPARE(messenger.filteredConversations()->rowCount(), 1);
+            QCOMPARE(messenger.filteredConversations()->get(0).value("peer").toString(), "77");
+            folders->setSelected("2");
+            QCOMPARE(messenger.filteredConversations()->rowCount(), 1);
+            QCOMPARE(messenger.filteredConversations()->get(0).value("peer").toString(), "88");
+            folders->setSelected("");
             QSignalSpy completed(folders, &FolderController::completed);
             folders->create("Друзья", {"77"}); QTRY_COMPARE(completed.count(), 1);
             QCOMPARE(folders->items().size(), 3); QVERIFY(folders->contains("3", "77"));

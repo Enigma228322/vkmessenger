@@ -30,8 +30,8 @@ Dialog {
     readonly property var controller: messenger.actions
     title: ({edit: "Редактирование сообщения", delete: "Удаление сообщений", forward: "Переслать сообщения", create: "Новая беседа", add: "Добавить участников", members: "Участники беседы", rename: "Название беседы", invite: "Приглашение в беседу", join: "Вступить по приглашению", search: "Поиск сообщений", peers: "Новый диалог", important: "Важные сообщения", attachments: "Вложения переписки", reacted: "Реакции", stickers: "Стикеры"})[mode] || "Беседа"
     background: Rectangle { radius: 18; color: sheet.palette.window; border.color: sheet.palette.mid }
-    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: sheet.reducedMotion ? 0 : 150 } }
-    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: sheet.reducedMotion ? 0 : 100 } }
+    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: sheet.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
+    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: sheet.reducedMotion ? 0 : 180; easing.type: Easing.OutCubic } }
     function show(kind, contextPeer, ids, text) {
         mode = kind; peer = contextPeer || ""; cmids = ids || []; sourceText = text || ""
         selectedPeers = []; localPeers = []; controller.reset()

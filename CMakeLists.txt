@@ -32,7 +32,7 @@ if(APPLE)
 endif()
 
 qt_add_executable(VK MACOSX_BUNDLE
-    src/main.cpp src/Messenger.cpp src/Messenger.h
+    src/main.cpp src/Messenger.cpp src/Messenger.h src/models/ConversationFilterModel.cpp src/models/ConversationFilterModel.h
     src/OAuth.cpp src/OAuth.h src/Keychain.cpp src/Keychain.h
     src/LongPoll.cpp src/LongPoll.h src/LongPollEvent.h src/Form.h
     src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h
@@ -40,7 +40,7 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/LottieSticker.cpp src/LottieSticker.h)
 qt_add_qml_module(VK
     URI VK VERSION 1.0
-    QML_FILES qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
+    QML_FILES qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VK PRIVATE vkm-platform Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Multimedia opus rlottie::rlottie ZLIB::ZLIB)
@@ -68,8 +68,25 @@ set_target_properties(VK PROPERTIES
     MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 
+
+# Relinking a previously deployed bundle restores SDK library paths in the
+# executable. Refresh plugins, paths and signatures together before it is run.
+if(APPLE)
+    get_filename_component(VKM_QT_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
+    add_custom_command(TARGET VK POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" "-DAPP_BUNDLE=$<TARGET_BUNDLE_DIR:VK>"
+            "-DQT_ROOT=${VKM_QT_ROOT}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeployMac.cmake"
+        COMMENT "Deploying and signing the macOS application bundle"
+        VERBATIM)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
+    if(APPLE)
+        add_test(NAME app-bundle-self-check COMMAND "$<TARGET_FILE:VK>" --self-check)
+        set_tests_properties(app-bundle-self-check PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    endif()
     find_package(Qt6 REQUIRED COMPONENTS Test)
     find_program(VKM_NODE_EXECUTABLE node)
     if(VKM_NODE_EXECUTABLE)
@@ -93,7 +110,7 @@ if(BUILD_TESTING)
     target_link_libraries(protocol-tests PRIVATE Qt6::Test Qt6::Network Qt6::Gui)
     add_test(NAME protocol-tests COMMAND protocol-tests)
 
-    qt_add_executable(messenger-tests tests/MessengerTest.cpp
+    qt_add_executable(messenger-tests tests/MessengerTest.cpp src/models/ConversationFilterModel.cpp src/models/ConversationFilterModel.h
         src/Messenger.cpp src/Messenger.h src/OAuth.cpp src/OAuth.h src/LongPoll.cpp src/LongPoll.h
         src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
         src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h src/LottieSticker.cpp src/LottieSticker.h)

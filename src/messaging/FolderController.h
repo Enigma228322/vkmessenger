@@ -4,6 +4,9 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QVariantList>
+#include <QSet>
+#include <QHash>
+#include <utility>
 #include <functional>
 
 class Messenger;
@@ -44,6 +47,11 @@ private:
     Messenger *m_messenger;
     QSettings m_settings;
     QJsonObject m_catalog;
+    struct Membership {
+        QSet<QString> included, excluded;
+        QList<std::pair<qint64, qint64>> filters;
+    };
+    QHash<QString, Membership> m_membership;
     QVariantList m_items;
     QString m_selected, m_error;
     bool m_busy = false, m_refreshPending = false;

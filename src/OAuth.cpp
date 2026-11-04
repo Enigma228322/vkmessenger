@@ -2,11 +2,13 @@
 #include "Form.h"
 #include <QCryptographicHash>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QNetworkReply>
 #include <QRandomGenerator>
 #include <QTcpSocket>
 #include <algorithm>
+#include <limits>
 
 OAuth::OAuth(QObject *parent, QNetworkAccessManager *network) : QObject(parent), m_network(network ? network : &m_defaultNetwork)
 {
@@ -88,6 +90,7 @@ void OAuth::cancel()
     m_verifier.clear();
     m_consumedState.clear();
     m_exchanging = false;
+    m_apiLogin = false;
     m_timeout.stop();
     m_server.close();
     if (m_reply) {
@@ -138,8 +141,89 @@ void OAuth::start(const QString &clientId, const QString &redirect, const QStrin
     }
 }
 
+void OAuth::startApi(const QString &clientId)
+{
+    cancel();
+    bool valid = false;
+    if (clientId.toLongLong(&valid) <= 0 || !valid) {
+        emit failed(QStringLiteral("Укажите ID зарегистрированного приложения VK API."));
+        return;
+    }
+    m_apiLogin = true;
+    m_clientId = clientId;
+    m_redirect = "https://oauth.vk.com/blank.html";
+    m_state = randomString();
+    QUrl url("https://oauth.vk.com/authorize");
+    QUrlQuery query;
+    query.addQueryItem("client_id", clientId);
+    query.addQueryItem("display", "page");
+    query.addQueryItem("redirect_uri", m_redirect);
+    query.addQueryItem("scope", "messages");
+    query.addQueryItem("response_type", "token");
+    query.addQueryItem("state", m_state);
+    query.addQueryItem("v", "5.199");
+    url.setQuery(query);
+    m_timeout.start(300000);
+    m_deadline.setRemainingTime(300000);
+    if (!QDesktopServices::openUrl(url)) {
+        cancel();
+        emit failed(QStringLiteral("Не удалось открыть браузер."));
+    }
+}
+
+bool OAuth::completeApi(const QUrl &url)
+{
+    // Implicit OAuth returns a token in the fragment of VK's own blank page.
+    // Keep this separate from the strict PKCE callback and never relay it via
+    // our HTTPS server or custom scheme.
+    QUrl address(url); address.setFragment(QString());
+    const bool correctAddress = sameRedirect(address, QUrl(m_redirect)) && !url.hasQuery() && url.hasFragment();
+    const QUrlQuery fragment(url.fragment(QUrl::FullyEncoded));
+    const auto state = fragment.queryItemValue("state", QUrl::FullyDecoded);
+    if (correctAddress && !m_consumedState.isEmpty() && state == m_consumedState) return false;
+    if (m_state.isEmpty() || !correctAddress || state != m_state) {
+        emit callbackRejected(QStringLiteral("Ссылка не соответствует текущему входу VK API. Нужен полный адрес blank.html с текущим state."));
+        return false;
+    }
+    const auto items = fragment.queryItems();
+    for (const auto &name : {"state", "access_token", "user_id", "expires_in", "error"}) {
+        if (std::count_if(items.begin(), items.end(), [name](const auto &item) { return item.first == name; }) > 1) {
+            emit callbackRejected(QStringLiteral("В ссылке повторяются параметры входа."));
+            return false;
+        }
+    }
+    if (fragment.hasQueryItem("error")) {
+        if (fragment.hasQueryItem("access_token")) {
+            emit callbackRejected(QStringLiteral("В ссылке несовместимые параметры входа."));
+            return false;
+        }
+        cancel(); emit failed(QStringLiteral("VK отклонил вход через OAuth VK API."));
+        return true;
+    }
+    const auto token = fragment.queryItemValue("access_token", QUrl::FullyDecoded);
+    bool validUser = false, validExpiry = false;
+    const auto user = fragment.queryItemValue("user_id").toLongLong(&validUser);
+    const auto lifetime = fragment.queryItemValue("expires_in").toLongLong(&validExpiry);
+    const auto now = QDateTime::currentSecsSinceEpoch();
+    if (token.isEmpty() || std::any_of(token.begin(), token.end(), [](QChar c) { return c.isSpace() || c.category() == QChar::Other_Control; })
+        || !validUser || user <= 0 || !validExpiry || lifetime < 0 || lifetime > std::numeric_limits<qint64>::max() - now) {
+        emit callbackRejected(QStringLiteral("В ссылке отсутствуют или некорректны access_token, user_id или expires_in."));
+        return false;
+    }
+    m_consumedState = m_state; m_state.clear(); m_timeout.stop();
+    QJsonObject session{{"access_token", token}, {"user_id", user}, {"client_id", m_clientId},
+        {"auth_type", "oauth_api"}, {"redirect_uri", m_redirect},
+        {"expires_at", lifetime == 0 ? qint64(0) : now + lifetime}};
+    emit authenticated(session);
+    return true;
+}
+
 bool OAuth::completeAppCallback(const QUrl &callback)
 {
+    if (m_apiLogin) {
+        emit callbackRejected(QStringLiteral("Для входа VK API вставьте полный адрес страницы blank.html в приложении."));
+        return false;
+    }
     if (!isAppCallback(callback)) {
         emit callbackRejected(QStringLiteral("Некорректный адрес возврата в приложение."));
         return false;
@@ -164,6 +248,7 @@ bool OAuth::complete(const QString &callback)
     const QUrl url(callback.trimmed(), QUrl::StrictMode);
     const QUrlQuery query(url);
     if (awaitingCallback() && m_deadline.hasExpired()) { expire(); return false; }
+    if (m_apiLogin) return completeApi(url);
     // A browser may deliver the same URL more than once. Never turn a duplicate
     // into a terminal login failure while the token request is in flight.
     if (sameRedirect(url, QUrl(m_redirect)) && (m_exchanging || (!m_consumedState.isEmpty()

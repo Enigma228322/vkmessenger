@@ -20,9 +20,15 @@ Popup {
     modal: false
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    background: Rectangle { color: theme.surface; border.color: theme.divider; radius: 14 }
-    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: popup.reduceMotion ? 0 : 120 } }
-    exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: popup.reduceMotion ? 0 : 100 } }
+    background: MenuSurface { color: theme.surface; borderColor: theme.divider }
+    transformOrigin: Item.TopRight
+    enter: Transition {
+        ParallelAnimation {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: popup.reduceMotion ? 0 : 180; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: popup.reduceMotion ? 0 : 220; easing.type: Easing.OutCubic }
+        }
+    }
+    exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: popup.reduceMotion ? 0 : theme.hoverDuration; easing.type: Easing.OutCubic } }
     function showAt(item, value, focusItem) {
         origin = item
         message = value
@@ -112,7 +118,7 @@ Popup {
                         ActionIcon { kind: modelData.kind; stroke: modelData.kind === "delete" || modelData.kind === "cancel" ? "#ff5c5c" : theme.muted; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
                         Text { text: modelData.title; color: modelData.kind === "delete" || modelData.kind === "cancel" ? "#ff5c5c" : theme.ink; font.pixelSize: 14; Layout.fillWidth: true; elide: Text.ElideRight }
                     }
-                    background: Rectangle { radius: 8; color: parent.hovered || parent.activeFocus ? theme.secondary : "transparent" }
+                    background: Rectangle { radius: 8; color: parent.hovered || parent.activeFocus ? theme.secondary : "transparent"; Behavior on color { enabled: !popup.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
                     onClicked: { popup.command(modelData.kind); popup.close() }
                 }
             }

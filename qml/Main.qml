@@ -41,6 +41,7 @@ ApplicationWindow {
     property int newMessages: 0
     property var selectedIds: []
     property bool darkTheme: messenger.darkTheme
+    readonly property bool motionEnabled: window.active && !messenger.reduceMotion
     property color surface: design.surface
     property color secondarySurface: design.secondary
     property color canvasColor: design.canvas
@@ -50,6 +51,11 @@ ApplicationWindow {
     palette.windowText: ink
     palette.buttonText: ink
     palette.button: design.secondary
+    palette.light: design.secondary
+    palette.midlight: design.divider
+    palette.mid: design.divider
+    palette.dark: design.divider
+    palette.placeholderText: design.muted
     palette.highlight: accent
     palette.highlightedText: darkTheme ? "#ffffff" : "#172536"
     function messageActions(kind, item) {
@@ -75,24 +81,17 @@ ApplicationWindow {
         restoreDraft()
         composer.forceActiveFocus()
     }
-    function conversationMatches(item) {
-        messenger.folders.revision
-        return messenger.folders.contains(messenger.folders.selected, item.peer)
-            && item.title.toLowerCase().indexOf(window.search) !== -1
-            && (window.conversationFilter === 3 ? !!item.archived : !item.archived)
-            && (!window.unreadOnly || item.unread > 0 || !!item.markedUnread)
-            && (window.conversationFilter !== 2 || !!item.important)
-    }
-    readonly property string pinnedBoundaryPeer: {
-        messenger.conversations.revision
-        let hasPinned = false
-        for (let i = 0; i < messenger.conversations.rowCount(); ++i) {
-            const row = messenger.conversations.get(i)
-            if (!conversationMatches(row)) continue
-            if (row.pinned) hasPinned = true
-            else if (hasPinned) return String(row.peer)
-        }
-        return ""
+    Binding { target: messenger.filteredConversations; property: "query"; value: window.search }
+    Binding { target: messenger.filteredConversations; property: "category"; value: window.conversationFilter }
+    Binding { target: messenger.filteredConversations; property: "unreadOnly"; value: window.unreadOnly }
+    readonly property string pinnedBoundaryPeer: messenger.filteredConversations.pinnedBoundaryPeer
+    readonly property bool conversationFiltersActive: search.trim().length > 0 || conversationFilter !== 0 || unreadOnly || messenger.folders.selected.length > 0
+    function resetConversationFilters() {
+        searchField.clear()
+        window.search = ""
+        window.conversationFilter = 0
+        window.unreadOnly = false
+        messenger.folders.selected = ""
     }
     function toggleSelection(id) {
         selectedIds = selectedIds.indexOf(id) >= 0 ? selectedIds.filter(function(x) { return x !== id }) : selectedIds.concat([id])
@@ -167,13 +166,15 @@ ApplicationWindow {
         leftPadding: 16
         rightPadding: 16
         font.weight: Font.DemiBold
+        scale: action.down && window.motionEnabled ? 0.97 : 1
+        Behavior on scale { enabled: window.motionEnabled; NumberAnimation { duration: design.pressDuration; easing.type: Easing.OutCubic } }
         background: Rectangle {
             radius: 10
             color: !action.enabled ? (window.darkTheme ? "#293442" : "#e5eaf0") : action.primary
                 ? (action.down ? "#0066db" : action.hovered ? "#1683ff" : window.accent)
                 : (action.hovered ? (window.darkTheme ? "#3b4b5f" : "#e9eef5") : action.quiet ? "transparent" : window.palette.button)
             border.color: action.activeFocus ? window.accent : "transparent"
-            Behavior on color { ColorAnimation { duration: messenger.reduceMotion ? 0 : 100 } }
+            Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
         contentItem: Text {
             text: action.text
@@ -182,6 +183,29 @@ ApplicationWindow {
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
+    }
+
+    component HeaderAction: ToolButton {
+        id: headerAction
+        property string kind: ""
+        property string label: ""
+        implicitWidth: 36
+        implicitHeight: 36
+        hoverEnabled: true
+        Accessible.name: label
+        ToolTip.visible: hovered
+        ToolTip.text: label
+        ToolTip.delay: 650
+        scale: down && window.motionEnabled ? 0.94 : 1
+        Behavior on scale { enabled: window.motionEnabled; NumberAnimation { duration: design.pressDuration; easing.type: Easing.OutCubic } }
+        background: Rectangle {
+            radius: 10
+            color: headerAction.down ? (window.darkTheme ? "#3a3a3a" : "#e1e7ef") : headerAction.hovered ? window.secondarySurface : "transparent"
+            border.width: 1
+            border.color: headerAction.visualFocus ? window.accent : "transparent"
+            Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
+        }
+        contentItem: ActionIcon { kind: headerAction.kind; stroke: headerAction.hovered || headerAction.visualFocus ? window.ink : window.muted; Behavior on stroke { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
     }
 
     component Input: TextField {
@@ -194,7 +218,8 @@ ApplicationWindow {
         background: Rectangle {
             radius: 9
             color: window.secondarySurface
-            border.color: input.activeFocus ? window.accent : "#e4e9ef"
+            border.color: input.activeFocus ? window.accent : design.divider
+            Behavior on border.color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
     }
 
@@ -259,6 +284,7 @@ ApplicationWindow {
         property string name: ""
         property string source: ""
         property int tint: 0
+        property bool animateImage: false
         width: 46
         height: 46
         radius: width / 2
@@ -271,11 +297,14 @@ ApplicationWindow {
             font.weight: Font.DemiBold
         }
         Image {
+            objectName: "avatarImage"
             anchors.fill: parent
             source: { messenger.media.revision; return messenger.media.source(avatar.source) }
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             visible: status === Image.Ready
+            opacity: status === Image.Ready ? 1 : 0
+            Behavior on opacity { enabled: avatar.animateImage && window.motionEnabled; NumberAnimation { duration: design.motionDuration; easing.type: Easing.OutCubic } }
         }
     }
 
@@ -298,7 +327,7 @@ ApplicationWindow {
             }
         }
         function onChanged() {
-            if (messenger.browserLoginPending && messenger.redirectUri.indexOf("https://") === 0) loginReturn.open()
+            if (messenger.browserLoginPending && (messenger.browserLoginUsesToken || messenger.redirectUri.indexOf("https://") === 0)) loginReturn.open()
             else if (!messenger.authorizing) loginReturn.close()
             if (messenger.selectedPeer !== window.draftPeer) {
                 window.editingMessage = ""
@@ -432,7 +461,7 @@ ApplicationWindow {
                                 delegate: Button {
                                     required property var modelData
                                     text: modelData.name
-                                    background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent" }
+                                    background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent"; Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
                                     highlighted: window.conversationFilter === modelData.value
                                     onClicked: window.conversationFilter = modelData.value
                                 }
@@ -456,7 +485,7 @@ ApplicationWindow {
                                     delegate: Button {
                                         required property var modelData
                                         text: modelData.name
-                                        background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent" }
+                                        background: Rectangle { radius: 8; color: parent.highlighted || parent.hovered ? window.secondarySurface : "transparent"; Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
                                         highlighted: messenger.folders.selected === modelData.id
                                         onClicked: messenger.folders.selected = modelData.id
                                     }
@@ -467,23 +496,58 @@ ApplicationWindow {
                     }
                     ListView {
                         id: chats
+                        objectName: "conversationList"
+                        property Item hoveredChat: null
+                        function hoverChat(row) {
+                            if (moving) return
+                            hoveredChat = row
+                            chatHover.y = row.y + (row.startsUnpinned ? 12 : 0)
+                        }
+                        onMovementStarted: hoveredChat = null
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         spacing: 0
-                        model: messenger.conversations
+                        model: messenger.filteredConversations
+                        Rectangle {
+                            id: chatHover
+                            objectName: "conversationHover"
+                            parent: chats.contentItem
+                            z: -1
+                            width: chats.width
+                            height: 66
+                            radius: 12
+                            color: window.secondarySurface
+                            opacity: chats.hoveredChat && chats.hoveredChat.visible && !chats.moving && window.active ? 1 : 0
+                            Behavior on y {
+                                enabled: window.motionEnabled && chatHover.opacity > 0.01 && !chats.moving
+                                NumberAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic }
+                            }
+                            Behavior on opacity {
+                                enabled: window.motionEnabled
+                                NumberAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic }
+                            }
+                        }
                         ScrollBar.vertical: ScrollBar {}
                         delegate: Rectangle {
                             id: chat
                             required property var item
                             required property int index
-                            property bool matches: window.conversationMatches(item)
-                            readonly property bool startsUnpinned: matches && String(item.peer) === window.pinnedBoundaryPeer
+                            readonly property bool startsUnpinned: String(item.peer) === window.pinnedBoundaryPeer
                             width: ListView.view.width
-                            height: matches ? 66 + (startsUnpinned ? 12 : 0) : 0
-                            visible: matches
+                            height: 66 + (startsUnpinned ? 12 : 0)
                             radius: 12
-                            color: messenger.selectedPeer === item.peer ? (window.darkTheme ? "#333333" : "#eaf3ff") : mouse.containsMouse ? window.secondarySurface : "transparent"
+                            color: messenger.selectedPeer === item.peer ? (window.darkTheme ? "#333333" : "#eaf3ff") : "transparent"
+                            Behavior on color { enabled: window.motionEnabled && chat.visible && !chats.moving; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.verticalCenterOffset: chat.startsUnpinned ? 6 : 0
+                                width: 3; height: 28; radius: 1.5
+                                color: window.accent
+                                opacity: messenger.selectedPeer === chat.item.peer ? 1 : 0
+                                Behavior on opacity { enabled: window.motionEnabled; NumberAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
+                            }
                             Rectangle {
                                 objectName: "pinnedChatsDivider"
                                 visible: chat.startsUnpinned
@@ -520,6 +584,9 @@ ApplicationWindow {
                                 id: mouse
                                 anchors.fill: parent
                                 hoverEnabled: true
+                                onEntered: chats.hoverChat(chat)
+                                onPositionChanged: if (containsMouse) chats.hoverChat(chat)
+                                onExited: if (chats.hoveredChat === chat) chats.hoveredChat = null
                                 cursorShape: Qt.PointingHandCursor
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 onPressed: function(event) {
@@ -531,15 +598,27 @@ ApplicationWindow {
                                 onClicked: window.selectChat(chat.item.peer, chat.item.title)
                             }
                         }
-                        Text {
+                        Column {
+                            objectName: "conversationEmptyState"
                             anchors.centerIn: parent
                             width: parent.width - 30
+                            spacing: 12
                             visible: chats.count === 0
-                            text: messenger.connected ? "Здесь появятся ваши диалоги" : "Вставьте access_token,\nчтобы открыть переписку"
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.Wrap
-                            color: window.muted
-                            lineHeight: 1.4
+                            Text {
+                                width: parent.width
+                                text: window.conversationFiltersActive ? "Ничего не найдено" : messenger.connected ? "Здесь появятся ваши диалоги" : "Войдите, чтобы открыть переписку"
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.Wrap
+                                color: window.muted
+                                lineHeight: 1.4
+                            }
+                            ActionButton {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: window.conversationFiltersActive
+                                text: "Сбросить фильтры"
+                                quiet: true
+                                onClicked: window.resetConversationFilters()
+                            }
                         }
                     }
                     Switch { Layout.fillWidth: true; text: "Только непрочитанные"; checked: window.unreadOnly; onToggled: window.unreadOnly = checked }
@@ -591,9 +670,17 @@ ApplicationWindow {
                         Layout.alignment: Qt.AlignHCenter
                         visible: !messenger.connected && messenger.loginConfigured
                         objectName: "vkIdLoginButton"
-                        text: messenger.authorizing ? "Ожидаем вход…" : "Войти через VK"
+                        text: messenger.authorizing ? "Ожидаем вход…" : "Войти через VK ID"
                         primary: true; enabled: !messenger.authorizing
                         onClicked: messenger.login()
+                    }
+                    ActionButton {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: !messenger.connected && messenger.loginConfigured
+                        objectName: "vkApiLoginButton"
+                        text: "Войти через VK API"
+                        enabled: !messenger.authorizing
+                        onClicked: messenger.loginApi()
                     }
                     TokenLogin {
                         Layout.fillWidth: true
@@ -635,23 +722,40 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         height: 78
                         color: window.surface
+                        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: design.divider }
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 26
                             anchors.rightMargin: 26
                             spacing: 12
-                            Avatar { name: messenger.title; width: 40; height: 40 }
+                            Avatar {
+                                objectName: "conversationHeaderAvatar"
+                                TapHandler { onTapped: profilePanel.present(profileButton) }
+                                animateImage: true
+                                name: messenger.title
+                                width: 40; height: 40
+                                source: {
+                                    messenger.conversations.revision
+                                    const row = messenger.conversations.find(messenger.selectedPeer)
+                                    return row < 0 ? "" : messenger.conversations.get(row).avatar || ""
+                                }
+                            }
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 4
-                                Text { Layout.fillWidth: true; text: messenger.title; color: window.ink; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
+                                Text { Layout.fillWidth: true; text: messenger.title; color: window.ink; font.pixelSize: 16; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText
+                                    TapHandler { onTapped: profilePanel.present(profileButton) }
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: "Информация: " + messenger.title
+                                    Accessible.onPressAction: profilePanel.present(profileButton)
+                                }
                                 Text { Layout.fillWidth: true; text: messenger.peerActivity; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                             }
-                            ToolButton { id: profileButton; implicitWidth: 36; Accessible.name: "Информация о переписке"; contentItem: ActionIcon { kind: "info"; stroke: window.muted }
+                            HeaderAction { id: profileButton; kind: "info"; label: "Информация о переписке"
                                 onClicked: profilePanel.present(profileButton) }
-                            ToolButton { implicitWidth: 36; Accessible.name: "Обновить"; contentItem: ActionIcon { kind: "retry"; stroke: window.muted }
+                            HeaderAction { kind: "retry"; label: "Обновить"
                                 onClicked: messenger.reload() }
-                            ToolButton { implicitWidth: 36; Accessible.name: "Поиск в переписке"; contentItem: ActionIcon { kind: "search"; stroke: window.muted }
+                            HeaderAction { kind: "search"; label: "Поиск в переписке"
                                 onClicked: actionSheet.show("search", messenger.selectedPeer, [], "") }
                             ToolButton { text: "···"; implicitWidth: 36; Accessible.name: "Действия с перепиской"; onClicked: conversationMenu.popup() }
                         }
@@ -719,7 +823,7 @@ ApplicationWindow {
                         delegate: Item {
                             id: entry
                             Component.onCompleted: if (item.local && !messenger.reduceMotion) messageAppear.start()
-                            NumberAnimation { id: messageAppear; target: entry; property: "opacity"; from: 0; to: 1; duration: 150 }
+                            NumberAnimation { id: messageAppear; target: entry; property: "opacity"; from: 0; to: 1; duration: design.motionDuration; easing.type: Easing.OutCubic }
                             objectName: "messageRow"
                             required property var item
                             property real inset: window.selectedIds.length ? 44 : history.width < 520 ? 16 : 24
@@ -783,7 +887,9 @@ ApplicationWindow {
                                     text: "···"; width: 24; height: 24; padding: 0
                                     x: window.flatMessages ? bubble.width - width : entry.item.outgoing ? -28 : bubble.width + 4
                                     y: 0
-                                    visible: bubbleHover.hovered || hovered || (messagePopup.opened && messagePopup.origin === bubble) || activeFocus
+                                    opacity: bubbleHover.hovered || hovered || (messagePopup.opened && messagePopup.origin === bubble) || activeFocus ? 1 : 0
+                                    visible: opacity > 0
+                                    Behavior on opacity { enabled: window.motionEnabled; NumberAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
                                     onClicked: messagePopup.showAt(bubble, entry.item, messageText)
                                     Accessible.name: "Действия с сообщением"
                                 }
@@ -863,7 +969,7 @@ ApplicationWindow {
                                                 implicitHeight: 30
                                                 leftPadding: 7; rightPadding: 7; topPadding: 5; bottomPadding: 5
                                                 Component.onCompleted: messenger.actions.ensureReactionAssets()
-                                                background: Rectangle { radius: 15; color: reactionChip.hovered || reactionChip.selectedReaction ? (window.darkTheme ? "#365775" : "#c9e2fd") : (window.darkTheme ? "#2c4b68" : "#eaf3fe"); border.color: window.darkTheme ? "#517092" : "#c3d9f0" }
+                                                background: Rectangle { radius: 15; color: reactionChip.hovered || reactionChip.selectedReaction ? (window.darkTheme ? "#365775" : "#c9e2fd") : (window.darkTheme ? "#2c4b68" : "#eaf3fe"); border.color: window.darkTheme ? "#517092" : "#c3d9f0"; Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
                                                 contentItem: Row {
                                                     id: reactionContents
                                                     spacing: 5
@@ -1058,7 +1164,7 @@ ApplicationWindow {
                                 visible: !window.editing
                                 Accessible.name: "Способ отправки"
                                 onClicked: sendOptions.popup()
-                                Menu { id: sendOptions; MenuItem { text: "Отправить без звука"; onTriggered: composer.submitWithMode(true) } }
+                                AppMenu { id: sendOptions; AppMenuItem { kind: "muted"; text: "Отправить без звука"; onTriggered: composer.submitWithMode(true) } }
                             }
                         }
                     }
@@ -1100,6 +1206,10 @@ ApplicationWindow {
     Connections {
         target: messenger.actions
         function onMediaRequested(source, type, title) { window.presentMedia(source, type, title) }
+        function onPhotoGalleryRequested(photos, selectedIndex) {
+            mediaViewerLoader.active = true
+            mediaViewerLoader.item.presentGallery(photos, selectedIndex)
+        }
         function onMessageEdited(peer, cmid) {
             if (window.editingPeer === peer && window.editingMessage === cmid) window.cancelEditing()
         }
@@ -1213,7 +1323,7 @@ ApplicationWindow {
                     width: 62; height: 62
                     padding: 12
                     contentItem: ReactionImage { remoteSource: modelData.links.static }
-                    background: Rectangle { radius: 16; color: parent.hovered ? (window.darkTheme ? "#365775" : "#e2efff") : "transparent" }
+                    background: Rectangle { radius: 16; color: parent.hovered ? (window.darkTheme ? "#365775" : "#e2efff") : "transparent"; Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
                     enabled: !messenger.actions.busy
                     onClicked: { messenger.actions.setReaction(reactionPicker.peer, reactionPicker.cmid, modelData.reaction_id); reactionPicker.close() }
                 }
@@ -1221,42 +1331,43 @@ ApplicationWindow {
         }
 
     }
-    Menu {
+    AppMenu {
         id: navigationMenu
-        MenuItem { text: "Создать беседу"; onTriggered: actionSheet.show("create", "", [], "") }
-        MenuItem { text: "Новый диалог"; onTriggered: actionSheet.show("peers", "", [], "") }
-        MenuItem { text: "Важные сообщения"; onTriggered: actionSheet.show("important", "", [], "") }
-        MenuItem { text: "Управление папками"; onTriggered: folderSheet.show() }
-        MenuItem { text: "Настройки"; onTriggered: settings.open() }
+        objectName: "navigationMenu"
+        AppMenuItem { kind: "add"; text: "Создать беседу"; onTriggered: actionSheet.show("create", "", [], "") }
+        AppMenuItem { kind: "person"; text: "Новый диалог"; onTriggered: actionSheet.show("peers", "", [], "") }
+        AppMenuItem { kind: "important"; text: "Важные сообщения"; onTriggered: actionSheet.show("important", "", [], "") }
+        AppMenuItem { kind: "folder"; text: "Управление папками"; onTriggered: folderSheet.show() }
+        AppMenuItem { kind: "settings"; text: "Настройки"; onTriggered: settings.open() }
     }
-    Menu {
+    AppMenu {
         id: conversationMenu
-        MenuItem { text: "Участники"; visible: messenger.isChat; onTriggered: actionSheet.show("members", messenger.selectedPeer, [], "") }
-        MenuItem { text: "Добавить участников"; visible: messenger.isChat; onTriggered: actionSheet.show("add", messenger.selectedPeer, [], "") }
-        MenuItem { text: "Переименовать беседу"; visible: messenger.isChat; onTriggered: actionSheet.show("rename", messenger.selectedPeer, [], messenger.title) }
-        MenuItem { text: "Фотография беседы"; visible: messenger.isChat; onTriggered: uploadFiles.choose("chat_photo") }
-        MenuItem { text: "Удалить фотографию"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "removePhoto") }
-        MenuItem { text: "Ссылка-приглашение"; visible: messenger.isChat; onTriggered: actionSheet.show("invite", messenger.selectedPeer, [], "") }
-        MenuItem { text: "Вступить по приглашению"; onTriggered: actionSheet.show("join", "", [], "") }
-        MenuItem { text: "Выйти из беседы…"; visible: messenger.isChat; onTriggered: confirmConversation.show("leave", "Выйти из беседы?") }
-        MenuSeparator {}
-        MenuItem { text: "Отметить прочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "read") }
-        MenuItem { text: "Отметить непрочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unread") }
-        MenuItem { text: "Добавить в важные"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "important") }
-        MenuItem { text: "Убрать из важных"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unimportant") }
-        MenuItem { text: "Закрепить диалог"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "pin") }
-        MenuItem { text: "Открепить диалог"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unpin") }
-        MenuItem { text: "Архивировать"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "archive") }
-        MenuItem { text: "Вернуть из архива"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unarchive") }
-        MenuSeparator {}
-        MenuItem { text: "Выключить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "mute") }
-        MenuItem { text: "Включить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmute") }
-        MenuItem { text: "Выключить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "muteMentions") }
-        MenuItem { text: "Включить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmuteMentions") }
-        MenuItem { text: "Вложения"; onTriggered: actionSheet.show("attachments", messenger.selectedPeer, [], "") }
-        MenuItem { text: "Открепить сообщение"; onTriggered: messenger.actions.setPinnedMessage(messenger.selectedPeer, "", false) }
-        MenuItem { text: "Удалить переписку…"; onTriggered: confirmConversation.show("delete", "Удалить переписку? Это действие нельзя отменить.") }
-        MenuItem { text: "Инструменты разработчика"; visible: messenger.apiInspectorEnabled; onTriggered: inspector.item.openMethod("messages.getConversationsById", {}) }
+        AppMenuItem { kind: "people"; text: "Участники"; visible: messenger.isChat; onTriggered: actionSheet.show("members", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "add"; text: "Добавить участников"; visible: messenger.isChat; onTriggered: actionSheet.show("add", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "edit"; text: "Переименовать беседу"; visible: messenger.isChat; onTriggered: actionSheet.show("rename", messenger.selectedPeer, [], messenger.title) }
+        AppMenuItem { kind: "photo"; text: "Фотография беседы"; visible: messenger.isChat; onTriggered: uploadFiles.choose("chat_photo") }
+        AppMenuItem { kind: "delete"; text: "Удалить фотографию"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "removePhoto") }
+        AppMenuItem { kind: "link"; text: "Ссылка-приглашение"; visible: messenger.isChat; onTriggered: actionSheet.show("invite", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "link"; text: "Вступить по приглашению"; onTriggered: actionSheet.show("join", "", [], "") }
+        AppMenuItem { kind: "leave"; destructive: true; text: "Выйти из беседы…"; visible: messenger.isChat; onTriggered: confirmConversation.show("leave", "Выйти из беседы?") }
+        AppMenuSeparator {}
+        AppMenuItem { kind: "select"; text: "Отметить прочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "read") }
+        AppMenuItem { kind: "select"; text: "Отметить непрочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unread") }
+        AppMenuItem { kind: "important"; text: "Добавить в важные"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "important") }
+        AppMenuItem { kind: "important"; text: "Убрать из важных"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unimportant") }
+        AppMenuItem { kind: "pin"; text: "Закрепить диалог"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "pin") }
+        AppMenuItem { kind: "pin"; text: "Открепить диалог"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unpin") }
+        AppMenuItem { kind: "archive"; text: "Архивировать"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "archive") }
+        AppMenuItem { kind: "archive"; text: "Вернуть из архива"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unarchive") }
+        AppMenuSeparator {}
+        AppMenuItem { kind: "muted"; text: "Выключить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "mute") }
+        AppMenuItem { kind: "notifications"; text: "Включить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmute") }
+        AppMenuItem { kind: "muted"; text: "Выключить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "muteMentions") }
+        AppMenuItem { kind: "notifications"; text: "Включить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmuteMentions") }
+        AppMenuItem { kind: "photo"; text: "Вложения"; onTriggered: actionSheet.show("attachments", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "pin"; text: "Открепить сообщение"; onTriggered: messenger.actions.setPinnedMessage(messenger.selectedPeer, "", false) }
+        AppMenuItem { kind: "delete"; destructive: true; text: "Удалить переписку…"; onTriggered: confirmConversation.show("delete", "Удалить переписку? Это действие нельзя отменить.") }
+        AppMenuItem { kind: "settings"; text: "Инструменты разработчика"; visible: messenger.apiInspectorEnabled; onTriggered: inspector.item.openMethod("messages.getConversationsById", {}) }
     }
     Dialog {
         id: confirmConversation
@@ -1267,14 +1378,14 @@ ApplicationWindow {
         function show(kind, question) { action = kind; peer = messenger.selectedPeer; title = question; open() }
         onAccepted: messenger.actions.conversationAction(peer, action)
     }
-    Menu {
+    AppMenu {
         id: uploadMenu
-        MenuItem { text: "Фотографии"; onTriggered: uploadFiles.choose("photo") }
-        MenuItem { text: "Документы / файлы"; onTriggered: uploadFiles.choose("doc") }
-        MenuItem { text: "Видео"; onTriggered: uploadFiles.choose("video") }
-        MenuItem { text: "Записать голосовое сообщение"; onTriggered: { voiceDialog.peer = messenger.selectedPeer; voiceDialog.open(); messenger.recorder.start() } }
-        MenuItem { text: "Голосовое сообщение из файла"; onTriggered: uploadFiles.choose("audio_message") }
-        MenuItem { text: "Стикеры"; onTriggered: actionSheet.show("stickers", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "photo"; text: "Фотографии"; onTriggered: uploadFiles.choose("photo") }
+        AppMenuItem { kind: "document"; text: "Документы / файлы"; onTriggered: uploadFiles.choose("doc") }
+        AppMenuItem { kind: "video"; text: "Видео"; onTriggered: uploadFiles.choose("video") }
+        AppMenuItem { kind: "microphone"; text: "Записать голосовое сообщение"; onTriggered: { voiceDialog.peer = messenger.selectedPeer; voiceDialog.open(); messenger.recorder.start() } }
+        AppMenuItem { kind: "microphone"; text: "Голосовое сообщение из файла"; onTriggered: uploadFiles.choose("audio_message") }
+        AppMenuItem { kind: "smile"; text: "Стикеры"; onTriggered: actionSheet.show("stickers", messenger.selectedPeer, [], "") }
     }
     FileDialog {
         id: uploadFiles
@@ -1320,7 +1431,7 @@ ApplicationWindow {
         parent: Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(500, window.width - 40)
-        title: "Завершение входа VK ID"
+        title: messenger.browserLoginUsesToken ? "Завершение входа VK API" : "Завершение входа VK ID"
         modal: true
         padding: 24
         standardButtons: Dialog.Cancel
@@ -1332,8 +1443,10 @@ ApplicationWindow {
             Label {
                 Layout.fillWidth: true
                 text: messenger.browserLoginPending
-                    ? "Подтвердите вход в браузере. На странице возврата разрешите открыть VK или нажмите «Вернуться в приложение»."
-                    : "Получен ответ браузера. Проверяем вход VK ID…"
+                    ? (messenger.browserLoginUsesToken
+                        ? "Подтвердите вход в браузере и вставьте полный адрес страницы oauth.vk.com/blank.html, включая #access_token и остальные параметры."
+                        : "Подтвердите вход в браузере. На странице возврата разрешите открыть VK или нажмите «Вернуться в приложение».")
+                    : "Получен ответ браузера. Проверяем вход…"
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
             }
@@ -1341,12 +1454,14 @@ ApplicationWindow {
                 id: manualLoginReturn
                 objectName: "vkIdManualReturn"
                 text: "Вставить ссылку вручную"
-                visible: messenger.browserLoginPending
+                visible: messenger.browserLoginPending && !messenger.browserLoginUsesToken
             }
             Label {
                 Layout.fillWidth: true
-                visible: manualLoginReturn.checked && messenger.browserLoginPending
-                text: "Если браузер не вернулся в приложение, вставьте полный адрес страницы " + messenger.redirectUri + "."
+                visible: messenger.browserLoginPending && (messenger.browserLoginUsesToken || manualLoginReturn.checked)
+                text: messenger.browserLoginUsesToken
+                    ? "Если VK показывает Security Error, этот способ входа отклонён: ссылку с ошибкой вставлять не нужно. Закройте это окно."
+                    : "Если браузер не вернулся в приложение, вставьте полный адрес страницы " + messenger.redirectUri + "."
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
             }
@@ -1354,16 +1469,16 @@ ApplicationWindow {
                 id: loginReturnUrl
                 objectName: "vkIdReturnInput"
                 Layout.fillWidth: true
-                visible: manualLoginReturn.checked && messenger.browserLoginPending
+                visible: messenger.browserLoginPending && (messenger.browserLoginUsesToken || manualLoginReturn.checked)
                 placeholderText: "Адрес страницы после входа"
                 echoMode: TextInput.Password
                 enabled: messenger.browserLoginPending
-                onAccepted: if (loginReturnUrl.text.trim().length && messenger.browserLoginPending) messenger.completeLogin(loginReturnUrl.text)
+                onAccepted: if (loginReturnUrl.text.trim().length && messenger.browserLoginPending) { messenger.completeLogin(loginReturnUrl.text); loginReturnUrl.clear() }
             }
             ActionButton {
                 objectName: "vkIdReturnSubmit"
                 Layout.fillWidth: true
-                visible: manualLoginReturn.checked && messenger.browserLoginPending
+                visible: messenger.browserLoginPending && (messenger.browserLoginUsesToken || manualLoginReturn.checked)
                 text: messenger.browserLoginPending ? "Завершить вход" : "Проверяем вход…"
                 primary: true
                 enabled: messenger.browserLoginPending && loginReturnUrl.text.trim().length > 0
@@ -1401,6 +1516,14 @@ ApplicationWindow {
             CheckBox { text: "Сообщения без пузырей"; checked: window.flatMessages; onToggled: messenger.flatMessages = checked }
             CheckBox { text: "Уменьшить анимацию"; checked: messenger.reduceMotion; onToggled: messenger.reduceMotion = checked }
             ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: { messenger.refreshCacheStats(); cacheDialog.open() } }
+            ActionButton {
+                objectName: "settingsVkApiLoginButton"
+                text: "Войти через VK API"
+                Layout.fillWidth: true
+                visible: messenger.loginConfigured
+                enabled: !messenger.authorizing
+                onClicked: { settings.close(); messenger.loginApi() }
+            }
             TokenLogin {
                 Layout.fillWidth: true
                 fieldName: "settingsAccessTokenInput"

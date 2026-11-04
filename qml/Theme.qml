@@ -12,5 +12,8 @@ QtObject {
     readonly property int messageWidth: 580
     readonly property int avatarSize: 36
     readonly property int bodySize: 15
-    readonly property int motionDuration: 160
+    readonly property int hoverDuration: 180
+    readonly property int pressDuration: 140
+    readonly property int motionDuration: 240
+    readonly property int panelDuration: 300
 }

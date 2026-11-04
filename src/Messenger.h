@@ -9,6 +9,7 @@
 #include "messaging/FolderController.h"
 #include "media/MediaCache.h"
 #include "media/VoiceRecorder.h"
+#include "models/ConversationFilterModel.h"
 #include <QAbstractListModel>
 #include <QJsonObject>
 #include <QSettings>
@@ -82,6 +83,7 @@ class Messenger : public QObject {
     friend class ActionController;
     friend class FolderController;
     Q_PROPERTY(ItemModel *conversations READ conversations CONSTANT)
+    Q_PROPERTY(ConversationFilterModel *filteredConversations READ filteredConversations CONSTANT)
     Q_PROPERTY(ItemModel *messages READ messages CONSTANT)
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
     Q_PROPERTY(bool demo READ demo NOTIFY changed)
@@ -115,11 +117,13 @@ class Messenger : public QObject {
     Q_PROPERTY(FolderController *folders READ folders CONSTANT)
     Q_PROPERTY(MediaCache *media READ media CONSTANT)
     Q_PROPERTY(VoiceRecorder *recorder READ recorder CONSTANT)
+    Q_PROPERTY(QVariantMap conversationProfile READ conversationProfile NOTIFY changed)
     Q_PROPERTY(bool isChat READ isChat NOTIFY changed)
     Q_PROPERTY(bool canManageChat READ canManageChat NOTIFY changed)
     Q_PROPERTY(bool apiInspectorEnabled READ apiInspectorEnabled CONSTANT)
     Q_PROPERTY(bool loginConfigured READ loginConfigured NOTIFY changed)
     Q_PROPERTY(bool browserLoginPending READ browserLoginPending NOTIFY changed)
+    Q_PROPERTY(bool browserLoginUsesToken READ browserLoginUsesToken NOTIFY changed)
     Q_PROPERTY(bool darkTheme READ darkTheme WRITE setDarkTheme NOTIFY changed)
     Q_PROPERTY(bool flatMessages READ flatMessages WRITE setFlatMessages NOTIFY changed)
     Q_PROPERTY(bool reduceMotion READ reduceMotion WRITE setReduceMotion NOTIFY changed)
@@ -134,6 +138,7 @@ public:
     explicit Messenger(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr, const QString &storagePath = {}, bool persistentSession = true);
     ~Messenger() override;
     ItemModel *conversations() { return &m_conversations; }
+    ConversationFilterModel *filteredConversations() { return &m_filteredConversations; }
     ItemModel *messages() { return &m_messages; }
     bool connected() const { return m_connected; }
     bool demo() const { return m_demo; }
@@ -147,6 +152,7 @@ public:
     bool offline() const { return m_offline; }
     bool loginConfigured() const { return !m_clientId.isEmpty(); }
     bool browserLoginPending() const { return m_authorizing && m_oauth.awaitingCallback(); }
+    bool browserLoginUsesToken() const { return m_authorizing && m_oauth.apiLogin(); }
     int outgoingCount() const { return m_outgoing.size(); }
     bool darkTheme() const { return m_settings.value("ui/darkTheme", true).toBool(); }
     bool flatMessages() const { return m_settings.value("ui/flatMessages", true).toBool(); }
@@ -176,6 +182,7 @@ public:
     FolderController *folders() { return &m_folders; }
     MediaCache *media() { return &m_media; }
     VoiceRecorder *recorder() { return &m_recorder; }
+    QVariantMap conversationProfile() const;
     bool isChat() const { return m_peer.toLongLong() > 2000000000; }
     bool canManageChat() const {
         const auto settings = m_rawConversations.value(m_peer).value("conversation").toObject().value("chat_settings").toObject();
@@ -188,6 +195,7 @@ public:
     Q_INVOKABLE void login();
     Q_INVOKABLE void loginWithToken(const QString &token, const QString &group = {});
     Q_INVOKABLE void completeLogin(const QString &callback);
+    Q_INVOKABLE void loginApi();
     Q_INVOKABLE void startDemo();
     Q_INVOKABLE void logout();
     Q_INVOKABLE void selectConversation(const QString &peer, const QString &title);
@@ -245,7 +253,7 @@ private:
     void rebuildConversations();
     void publishHistory();
     void acceptSession(QJsonObject session);
-    void beginTokenLogin(const QString &token, const QString &group = {});
+    void beginTokenLogin(const QString &token, const QString &group = {}, const QJsonObject &context = {});
     QString groupId() const { return LongPoll::cursor(m_session.value("group_id")).isEmpty() ? QString("0") : LongPoll::cursor(m_session.value("group_id")); }
     void fail(const QString &error);
     void restoreAccount(const QJsonObject &session, std::function<void()> done);
@@ -284,6 +292,7 @@ private:
     VkApiClient m_api;
     QTimer m_sync, m_refresh, m_activityExpiry, m_toastTimer;
     ItemModel m_conversations, m_messages;
+    ConversationFilterModel m_filteredConversations{&m_conversations, &m_folders, this};
     QJsonObject m_session;
     QHash<QString, QJsonObject> m_rawConversations, m_peers;
     QHash<QString, QMap<qint64, QJsonObject>> m_histories;

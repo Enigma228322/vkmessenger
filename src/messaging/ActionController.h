@@ -14,6 +14,7 @@ class ActionController : public QObject {
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QVariantList results READ results NOTIFY changed)
     Q_PROPERTY(QString inviteLink READ inviteLink NOTIFY changed)
+    Q_PROPERTY(int memberCount READ memberCount NOTIFY changed)
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY changed)
     Q_PROPERTY(bool cachedResults READ cachedResults NOTIFY changed)
     Q_PROPERTY(QVariantList reactionAssets READ reactionAssets NOTIFY reactionAssetsChanged)
@@ -24,6 +25,7 @@ public:
     QString error() const { return m_error; }
     QVariantList results() const { return m_results; }
     QString inviteLink() const { return m_inviteLink; }
+    int memberCount() const { return m_memberCount; }
     bool hasMore() const { return m_hasMore; }
     bool cachedResults() const { return m_cachedResults; }
     QVariantList reactionAssets() const { return m_reactionAssets; }
@@ -65,12 +67,13 @@ public:
     Q_INVOKABLE void favoriteSticker(int stickerId, bool favorite);
     Q_INVOKABLE void sendBotText(const QString &peer, const QString &text, const QString &payload);
     Q_INVOKABLE void clickBotCallback(const QString &peer, const QString &cmid, const QString &author, const QString &payload);
-    Q_INVOKABLE void openAttachment(const QVariantMap &attachment);
+    Q_INVOKABLE void openAttachment(const QVariantMap &attachment, const QVariantList &siblings = {});
 signals:
     void changed();
     void completed();
     void messageEdited(const QString &peer, const QString &cmid);
     void mediaRequested(const QUrl &source, const QString &type, const QString &title);
+    void photoGalleryRequested(const QVariantList &photos, int selectedIndex);
     void reactionAssetsChanged();
 private:
     using Callback = std::function<void(const QJsonValue &)>;
@@ -86,6 +89,7 @@ private:
     qint64 m_reactionsCachedAt = 0;
     quint64 m_generation = 0;
     int m_offset = 0;
+    int m_memberCount = 0;
     QString m_searchQuery, m_searchPeer;
     QString m_attachmentCmid;
     int m_attachmentPosition = -1;

@@ -49,11 +49,17 @@ QUrl MediaCache::source(const QUrl &remote)
     const auto local = cached(remote);
     if (!local.isEmpty()) {
         const auto file = local.toLocalFile();
-        if (!m_accessed.contains(file)) {
-            m_accessed.insert(file);
-            const auto now = QDateTime::currentMSecsSinceEpoch();
-            if (m_entries.contains(file)) m_entries[file].accessed = now;
-            QFile f(file); if (f.open(QIODevice::ReadOnly)) f.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime);
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        // A cache hit can arrive before the asynchronous startup scan finishes.
+        if (!m_entries.contains(file)) {
+            const auto size = QFileInfo(file).size();
+            m_entries.insert(file, {file, size, now}); m_bytes += size;
+        } else m_entries[file].accessed = now;
+        // Track every hit in RAM, but throttle filesystem writes for hot images.
+        if (!m_accessed.contains(file) || now - m_accessed.value(file) >= 60000) {
+            QFile f(file);
+            if (f.open(QIODevice::ReadOnly) && f.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime))
+                m_accessed.insert(file, now);
         }
         return local;
     }
@@ -123,7 +129,7 @@ void MediaCache::trim()
     std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.accessed < b.accessed; });
     for (const auto &entry : entries) {
         if (m_bytes <= m_limit) break;
-        if (QFile::remove(entry.path) || !QFileInfo::exists(entry.path)) { m_bytes -= entry.size; m_entries.remove(entry.path); }
+        if (QFile::remove(entry.path) || !QFileInfo::exists(entry.path)) { m_bytes -= entry.size; m_entries.remove(entry.path); m_accessed.remove(entry.path); }
     }
 }
 void MediaCache::scan()
@@ -151,5 +157,5 @@ void MediaCache::clear()
             else ++it;
         }
     }
-    m_errors.clear(); ++m_revision; emit changed();
+    m_errors.clear(); m_accessed.clear(); ++m_revision; emit changed();
 }

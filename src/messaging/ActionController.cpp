@@ -20,7 +20,7 @@ bool isPerson(const QString &value) { bool ok; auto id = value.toLongLong(&ok); 
 ActionController::ActionController(Messenger *messenger) : QObject(messenger), m_messenger(messenger) {}
 void ActionController::cancelPending() { ++m_generation; m_busy = false; emit changed(); }
 
-void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_searchQuery.clear(); m_searchPeer.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; emit changed(); }
+void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_searchQuery.clear(); m_searchPeer.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; m_memberCount = 0; emit changed(); }
 
 void ActionController::invoke(const QString &method, Form parameters, Callback callback, bool refresh)
 {
@@ -146,7 +146,7 @@ void ActionController::restrictMember(const QString &peer, const QString &member
 void ActionController::loadMembers(const QString &peer, bool nextPage)
 {
     const int offset = nextPage ? m_offset + 200 : 0;
-    invoke("messages.getConversationMembers", {{"peer_id", peer}, {"extended", "1"}, {"fields", "photo_100"}, {"count", "200"}, {"offset", QString::number(offset)}}, [this, nextPage, offset](const QJsonValue &value) {
+    invoke("messages.getConversationMembers", {{"peer_id", peer}, {"extended", "1"}, {"fields", "photo_100,online,last_seen"}, {"count", "200"}, {"offset", QString::number(offset)}}, [this, nextPage, offset](const QJsonValue &value) {
         m_offset = offset;
         if (!nextPage) m_results.clear();
         auto response = value.toObject(); QHash<QString, QJsonObject> profiles;
@@ -154,10 +154,13 @@ void ActionController::loadMembers(const QString &peer, bool nextPage)
         for (auto p : response.value("groups").toArray()) profiles[QString::number(-p.toObject().value("id").toInteger())] = p.toObject();
         for (auto v : response.value("items").toArray()) {
             auto member = v.toObject(); auto id = identifier(member.value("member_id")); auto profile = profiles.value(id);
-            auto row = safeJson(member).toMap(); row.insert("peer", id); row.insert("title", displayName(profile)); row.insert("avatar", profile.value("photo_100").toString());
+            auto row = safeJson(member).toMap(); row.insert("peer", id); row.insert("title", displayName(profile).isEmpty() ? id : displayName(profile)); row.insert("avatar", profile.value("photo_100").toString());
+            row.insert("online", profile.value("online").toInt() == 1);
+            row.insert("last_seen", safeJson(profile.value("last_seen")));
             m_results.append(row);
         }
-        m_hasMore = response.value("count").toInt() > m_results.size();
+        m_memberCount = response.value("count").toInt();
+        m_hasMore = m_memberCount > m_results.size();
     }, false);
 }
 
@@ -323,14 +326,30 @@ void ActionController::clickBotCallback(const QString &peer, const QString &cmid
         if (!event.isEmpty()) m_messenger->m_callbacks[event] = QDateTime::currentMSecsSinceEpoch() + 60000;
     }, false);
 }
-void ActionController::openAttachment(const QVariantMap &attachment)
+void ActionController::openAttachment(const QVariantMap &attachment, const QVariantList &siblings)
 {
     const auto type = attachment.value("type").toString();
     const auto item = QJsonObject::fromVariantMap(attachment.value(type).toMap());
     const auto title = item.value("title").toString(item.value("text").toString("Вложение"));
     if (type == "photo") {
         const auto sizes = item.value("sizes").toArray();
-        if (!sizes.isEmpty()) emit mediaRequested(QUrl(sizes.last().toObject().value("url").toString()), type, title);
+        if (sizes.isEmpty()) return;
+        const auto selectedUrl = QUrl(sizes.last().toObject().value("url").toString());
+        QVariantList photos;
+        int selectedIndex = -1;
+        for (const auto &sibling : siblings) {
+            const auto candidate = sibling.toMap();
+            if (candidate.value("type").toString() != "photo") continue;
+            const auto photo = QJsonObject::fromVariantMap(candidate.value("photo").toMap());
+            const auto photoSizes = photo.value("sizes").toArray();
+            if (photoSizes.isEmpty()) continue;
+            const auto url = QUrl(photoSizes.last().toObject().value("url").toString());
+            if (!url.isValid() || url.scheme() != "https" || url.host().isEmpty()) continue;
+            if (selectedIndex < 0 && url == selectedUrl) selectedIndex = photos.size();
+            photos.append(QVariantMap{{"source", url}, {"title", photo.value("text").toString("Фотография")}});
+        }
+        if (photos.size() > 1 && selectedIndex >= 0) emit photoGalleryRequested(photos, selectedIndex);
+        else emit mediaRequested(selectedUrl, type, title);
     } else if (type == "audio_message" || type == "audio") {
         const auto url = type == "audio_message" ? item.value("link_mp3").toString(item.value("link_ogg").toString()) : item.value("url").toString();
         if (!url.isEmpty()) emit mediaRequested(QUrl(url), type, title);

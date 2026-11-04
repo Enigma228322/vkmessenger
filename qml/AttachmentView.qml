@@ -90,7 +90,7 @@ ColumnLayout {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                         if (root.animationUrl(row.modelData).length) imageFrame.paused = !imageFrame.paused
-                        else messenger.actions.openAttachment(row.modelData)
+                        else messenger.actions.openAttachment(row.modelData, root.attachments)
                     }
                 }
             }
@@ -100,9 +100,10 @@ ColumnLayout {
                 visible: row.modelData.type !== "sticker"
                 Label { text: root.title(row.modelData); Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; textFormat: Text.PlainText }
                 Button {
+                    objectName: "attachmentOpen"
                     text: row.modelData.type === "audio_message" || row.modelData.type === "audio" ? "▶" : row.modelData.type === "video" ? "Смотреть" : "Открыть"
                     enabled: root.url(row.modelData).length > 0
-                    onClicked: messenger.actions.openAttachment(row.modelData)
+                    onClicked: messenger.actions.openAttachment(row.modelData, root.attachments)
                 }
                 Button { text: "В VK"; visible: row.modelData.type === "video"; enabled: root.url(row.modelData).length > 0; onClicked: Qt.openUrlExternally(root.url(row.modelData)) }
                 Button {

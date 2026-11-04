@@ -66,14 +66,14 @@ ListView {
                     visible: card.modelData.member.length > 0
                     text: "Действия с участником"
                     onClicked: memberMenu.popup()
-                    Menu {
+                    AppMenu {
                         id: memberMenu
-                        MenuItem { text: "Назначить администратором"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "admin"}) }
-                        MenuItem { text: "Снять права администратора"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "member"}) }
-                        MenuItem { text: "Передать владение"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "owner"}) }
-                        MenuItem { text: "Ограничить отправку сообщений"; onTriggered: view.methodRequested("messages.changeConversationMemberRestrictions", {peer_id: view.peer, member_ids_long: card.modelData.member, action: "ro", "for": "3600"}) }
-                        MenuItem { text: "Разрешить отправку сообщений"; onTriggered: view.methodRequested("messages.changeConversationMemberRestrictions", {peer_id: view.peer, member_ids_long: card.modelData.member, action: "rw"}) }
-                        MenuItem { text: "Удалить из чата"; onTriggered: view.methodRequested("messages.removeChatUser", {chat_id: String(Number(view.peer) - 2000000000), member_id: card.modelData.member}) }
+                        AppMenuItem { text: "Назначить администратором"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "admin"}) }
+                        AppMenuItem { text: "Снять права администратора"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "member"}) }
+                        AppMenuItem { text: "Передать владение"; onTriggered: view.methodRequested("messages.setMemberRole", {peer_id: view.peer, member_id: card.modelData.member, role: "owner"}) }
+                        AppMenuItem { text: "Ограничить отправку сообщений"; onTriggered: view.methodRequested("messages.changeConversationMemberRestrictions", {peer_id: view.peer, member_ids_long: card.modelData.member, action: "ro", "for": "3600"}) }
+                        AppMenuItem { text: "Разрешить отправку сообщений"; onTriggered: view.methodRequested("messages.changeConversationMemberRestrictions", {peer_id: view.peer, member_ids_long: card.modelData.member, action: "rw"}) }
+                        AppMenuItem { text: "Удалить из чата"; onTriggered: view.methodRequested("messages.removeChatUser", {chat_id: String(Number(view.peer) - 2000000000), member_id: card.modelData.member}) }
                     }
                 }
             }

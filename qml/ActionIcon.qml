@@ -46,6 +46,42 @@ Canvas {
             c.beginPath(); c.arc(10,10,6,0,Math.PI*2); c.stroke(); path([[15,15],[21,21]])
         } else if (kind === "info") {
             c.beginPath(); c.arc(12,12,9,0,Math.PI*2); c.stroke(); path([[12,10],[12,17]]); path([[12,6],[12,6.5]])
+        } else if (kind === "notifications" || kind === "muted") {
+            c.beginPath(); c.moveTo(5,17); c.lineTo(7,14); c.lineTo(7,9); c.bezierCurveTo(7,2,17,2,17,9); c.lineTo(17,14); c.lineTo(19,17); c.closePath(); c.stroke()
+            c.beginPath(); c.arc(12,19,2,0,Math.PI); c.stroke()
+            if (kind === "muted") path([[3,3],[21,21]])
+        } else if (kind === "more") {
+            for (let x = 5; x <= 19; x += 7) { c.beginPath(); c.arc(x,12,1,0,Math.PI*2); c.stroke() }
+        } else if (kind === "settings") {
+            c.beginPath(); c.arc(12,12,4,0,Math.PI*2); c.stroke()
+            const points = []
+            for (let i = 0; i < 32; ++i) { const a = i*Math.PI/16, r = i%4 < 2 ? 10 : 8; points.push([12+Math.cos(a)*r,12+Math.sin(a)*r]) }
+            path(points, true)
+        } else if (kind === "archive" || kind === "folder") {
+            if (kind === "archive") { c.strokeRect(3,4,18,4); path([[5,8],[5,21],[19,21],[19,8]]); path([[10,12],[14,12]]) }
+            else path([[3,6],[10,6],[12,9],[21,9],[21,20],[3,20]],true)
+        } else if (kind === "add") {
+            path([[12,4],[12,20]]); path([[4,12],[20,12]])
+        } else if (kind === "people") {
+            c.beginPath(); c.arc(9,8,3.5,0,Math.PI*2); c.stroke()
+            c.beginPath(); c.arc(9,21,7,Math.PI,2*Math.PI); c.stroke()
+            c.beginPath(); c.arc(17,8,3, -Math.PI/2,Math.PI/2); c.stroke()
+            c.beginPath(); c.arc(17,21,5, -Math.PI/2,0); c.stroke()
+        } else if (kind === "photo") {
+            c.strokeRect(3,3,18,18); path([[3,17],[8,11],[12,15],[16,10],[21,16]])
+            c.beginPath(); c.arc(8,7,1,0,Math.PI*2); c.stroke()
+        } else if (kind === "document") {
+            path([[5,2],[14,2],[19,7],[19,22],[5,22]],true); path([[14,2],[14,7],[19,7]]); path([[8,12],[16,12]]); path([[8,16],[14,16]])
+        } else if (kind === "video") {
+            c.strokeRect(3,4,18,16); path([[10,8],[16,12],[10,16]],true)
+        } else if (kind === "microphone") {
+            c.beginPath(); c.arc(12,5,3,Math.PI,2*Math.PI); c.lineTo(15,12); c.arc(12,12,3,0,Math.PI); c.closePath(); c.stroke()
+            c.beginPath(); c.arc(12,12,7,0,Math.PI); c.stroke(); path([[5,12],[5,10]]); path([[19,12],[19,10]]); path([[12,19],[12,22]])
+        } else if (kind === "smile") {
+            c.beginPath(); c.arc(12,12,9,0,Math.PI*2); c.stroke(); path([[8,8],[8,9]]); path([[16,8],[16,9]])
+            c.beginPath(); c.arc(12,12,5,0.3,Math.PI-0.3); c.stroke()
+        } else if (kind === "leave") {
+            path([[10,3],[3,3],[3,21],[10,21]]); path([[8,12],[21,12],[17,8]]); path([[21,12],[17,16]])
         } else if (kind === "retry") {
             c.beginPath(); c.arc(12,12,8,0.4,5.3); c.stroke(); path([[12,3],[17,5],[17,0]])
         } else {

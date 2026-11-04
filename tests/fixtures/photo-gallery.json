@@ -1,0 +1,25 @@
+[
+  {
+    "type": "photo",
+    "photo": {
+      "text": "Первое фото",
+      "sizes": [{"url": "https://assets.test/gallery-first", "width": 32, "height": 32}]
+    }
+  },
+  {"type": "doc", "doc": {"title": "Документ", "url": "https://assets.test/document"}},
+  {"type": "photo", "photo": {"sizes": []}},
+  {
+    "type": "photo",
+    "photo": {
+      "text": "Второе фото",
+      "sizes": [{"url": "https://assets.test/gallery-second", "width": 32, "height": 32}]
+    }
+  },
+  {
+    "type": "photo",
+    "photo": {
+      "text": "Третье фото",
+      "sizes": [{"url": "https://assets.test/gallery-third", "width": 32, "height": 32}]
+    }
+  }
+]

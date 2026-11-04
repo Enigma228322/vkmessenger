@@ -122,6 +122,13 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
     m_activityExpiry.start();
     m_refresh.setSingleShot(true);
     connect(&m_refresh, &QTimer::timeout, this, [this] {
+        if (m_session.value("auth_type").toString() == "oauth_api") {
+            const auto remaining = m_session.value("expires_at").toInteger() - QDateTime::currentSecsSinceEpoch();
+            if (remaining > 0) { m_refresh.start(int(std::min<qint64>(remaining, 86400)) * 1000); return; }
+            logout();
+            fail("Срок действия токена VK API истёк. Войдите заново через VK API.");
+            return;
+        }
         ++m_historyGeneration;
         m_api.cancel();
         m_outboxSending = false;
@@ -143,17 +150,26 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
         fail(error);
     });
     connect(&m_oauth, &OAuth::callbackRejected, this, &Messenger::fail);
-    connect(&m_oauth, &OAuth::authenticated, this, &Messenger::acceptSession);
+    connect(&m_oauth, &OAuth::authenticated, this, [this](const QJsonObject &session) {
+        if (session.value("auth_type").toString() == "oauth_api")
+            beginTokenLogin(session.value("access_token").toString(), {}, session);
+        else acceptSession(session);
+    });
     QTimer::singleShot(0, this, [this] {
         if (!m_persistentSession || m_connected || m_authorizing) return;
         const auto saved = QJsonDocument::fromJson(Keychain::read()).object();
-        if (saved.value("auth_type").toString() == "manual_token"
+        const bool apiLogin = saved.value("auth_type").toString() == "oauth_api";
+        if ((saved.value("auth_type").toString() == "manual_token" || apiLogin)
             && !saved.value("access_token").toString().isEmpty()) {
+            const auto expires = saved.value("expires_at").toInteger();
+            if (apiLogin && expires > 0 && expires <= QDateTime::currentSecsSinceEpoch()) {
+                logout(); fail("Срок действия токена VK API истёк. Войдите заново через VK API."); return;
+            }
             m_session = saved;
             m_authorizing = true;
             m_token = saved.value("access_token").toString();
-            restoreAccount(saved, [this, saved] {
-                beginTokenLogin(saved.value("access_token").toString(), LongPoll::cursor(saved.value("group_id")));
+            restoreAccount(saved, [this, saved, apiLogin] {
+                beginTokenLogin(saved.value("access_token").toString(), LongPoll::cursor(saved.value("group_id")), apiLogin ? saved : QJsonObject());
             });
             return;
         }
@@ -190,14 +206,26 @@ void Messenger::login()
 void Messenger::completeLogin(const QString &callback)
 {
     if (m_oauth.complete(callback) && m_authorizing) {
-        m_error.clear(); m_status = "Проверяем вход VK ID…";
+        m_error.clear(); m_status = "Проверяем вход…";
     }
+    emit changed();
+}
+
+void Messenger::loginApi()
+{
+    if (m_clientId.isEmpty()) { fail("В этой сборке ещё не настроен вход через VK."); return; }
+    logout();
+    m_authorizing = true;
+    m_status = "Завершите вход VK API в браузере";
+    m_oauth.startApi(m_clientId.trimmed());
     emit changed();
 }
 
 void Messenger::acceptSession(QJsonObject session)
 {
-    if (session.value("refresh_token").toString().isEmpty())
+    m_refresh.stop();
+    if (session.value("auth_type").toString().isEmpty() && m_session.value("auth_type").toString().isEmpty()
+        && session.value("refresh_token").toString().isEmpty())
         session.insert("refresh_token", m_session.value("refresh_token"));
     m_session = session;
     m_token = session.value("access_token").toString();
@@ -212,7 +240,10 @@ void Messenger::acceptSession(QJsonObject session)
     m_status = "Подключение к сообщениям…";
     if (m_persistentSession && !Keychain::write(QJsonDocument(session).toJson(QJsonDocument::Compact)))
         m_error = "Не удалось сохранить сессию в Keychain. После закрытия понадобится повторный вход.";
-    if (!session.value("refresh_token").toString().isEmpty()) {
+    if (session.value("auth_type").toString() == "oauth_api" && session.value("expires_at").toInteger() > 0) {
+        const auto remaining = session.value("expires_at").toInteger() - QDateTime::currentSecsSinceEpoch();
+        m_refresh.start(int(std::clamp<qint64>(remaining, 1, 86400)) * 1000);
+    } else if (!session.value("refresh_token").toString().isEmpty()) {
         const auto seconds = std::clamp(session.value("expires_in").toInt(3600) - 60, 30, 86400);
         m_refresh.start(seconds * 1000);
     }
@@ -236,14 +267,14 @@ void Messenger::loginWithToken(const QString &token, const QString &group)
     beginTokenLogin(value, group);
 }
 
-void Messenger::beginTokenLogin(const QString &token, const QString &group)
+void Messenger::beginTokenLogin(const QString &token, const QString &group, const QJsonObject &context)
 {
     m_token = token;
     m_authorizing = true;
     m_status = "Проверка access_token…";
     emit changed();
     const bool community = !group.isEmpty() && group != "0";
-    api(community ? "groups.getById" : "users.get", community ? Form{{"group_ids", group}} : Form(), [this, token, group, community](const QJsonValue &value, const QString &error) {
+    api(community ? "groups.getById" : "users.get", community ? Form{{"group_ids", group}} : Form(), [this, token, group, community, context](const QJsonValue &value, const QString &error) {
         m_authorizing = false;
         if (!error.isEmpty()) {
             if (!m_connected) m_token.clear();
@@ -257,8 +288,18 @@ void Messenger::beginTokenLogin(const QString &token, const QString &group)
             fail("Не удалось определить аккаунт. Проверьте тип access_token и ID сообщества.");
             return;
         }
-        QJsonObject session{{"access_token", token}, {"auth_type", "manual_token"},
-            {"user_id", community ? -users.first().toObject().value("id").toInteger() : users.first().toObject().value("id").toInteger()}};
+        const auto user = community ? -users.first().toObject().value("id").toInteger() : users.first().toObject().value("id").toInteger();
+        const bool apiLogin = context.value("auth_type").toString() == "oauth_api";
+        if (apiLogin && context.value("user_id").toInteger() != user) {
+            m_token.clear(); fail("Аккаунт токена не совпадает с аккаунтом в ответе VK. Начните вход заново."); return;
+        }
+        const auto expires = context.value("expires_at").toInteger();
+        if (apiLogin && expires > 0 && expires <= QDateTime::currentSecsSinceEpoch()) {
+            logout(); fail("Срок действия токена VK API истёк. Войдите заново через VK API."); return;
+        }
+        QJsonObject session = apiLogin ? context : QJsonObject{{"auth_type", "manual_token"}};
+        session.insert("access_token", token);
+        session.insert("user_id", user);
         if (community) session.insert("group_id", group);
         acceptSession(session);
     });
@@ -374,6 +415,22 @@ void Messenger::drainSync()
     }
 }
 
+QVariantMap Messenger::conversationProfile() const
+{
+    auto result = safeJson(m_peers.value(m_peer)).toMap();
+    const auto conversation = m_rawConversations.value(m_peer).value("conversation").toObject();
+    const auto chat = conversation.value("chat_settings").toObject();
+    result.insert("members_count", chat.value("members_count").toInt());
+    for (const auto &value : m_conversations.rows) {
+        const auto row = value.toMap();
+        if (row.value("peer").toString() != m_peer) continue;
+        result.insert("muted", row.value("muted"));
+        result.insert("avatar", result.value("photo_200", row.value("avatar")));
+        break;
+    }
+    return result;
+}
+
 QString Messenger::peerActivity() const
 {
     if (m_activity.contains(m_peer)) return m_activity.value(m_peer).text;
@@ -469,7 +526,7 @@ void Messenger::fetchConversations()
 void Messenger::fetchDiffPage(const std::shared_ptr<DiffTransaction> &transaction, const QString &source)
 {
     Form params{{"lp_version", "21"}, {"conversations_limit", "200"}, {"nested_limit", "2"},
-        {"group_id", groupId()}, {"counter_filters", "all"}, {"fields", "photo_100,online"}};
+        {"group_id", groupId()}, {"counter_filters", "all"}, {"fields", "photo_100,photo_200,domain,online,last_seen"}};
     QString filters = "server_version,profiles,contacts,groups,messages";
     if (groupId() == "0") filters += ",counters";
     if (transaction->credentials && source.isEmpty()) filters += ",credentials";
@@ -568,7 +625,7 @@ void Messenger::fetchDiffPage(const std::shared_ptr<DiffTransaction> &transactio
 void Messenger::fetchPublicConversations(const std::shared_ptr<DiffTransaction> &transaction, int offset)
 {
     api("messages.getConversations", {{"count", "200"}, {"offset", QString::number(offset)}, {"filter", "all"},
-        {"extended", "1"}, {"fields", "photo_100,online"}, {"group_id", groupId()}},
+        {"extended", "1"}, {"fields", "photo_100,photo_200,domain,online,last_seen"}, {"group_id", groupId()}},
         [this, transaction, offset](const QJsonValue &value, const QString &error) {
         if (transaction->generation != m_generation) return;
         const auto response = value.toObject();

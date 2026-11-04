@@ -80,6 +80,28 @@ private slots:
         cache.source(second); QTRY_VERIFY(!cache.cached(second).isEmpty());
         QVERIFY(cache.cached(first).isEmpty()); QVERIFY(cache.bytes() <= cache.limit());
     }
+    void repeatedAccessKeepsFrequentlyViewedFiles()
+    {
+        QTemporaryDir directory;
+        AssetNetwork network;
+        network.content = QByteArray(23 * 1048576, 'a');
+        MediaCache cache(directory.path(), nullptr, &network);
+        cache.setLimit(64 * 1048576);
+        cache.setAccount("user:1");
+        const QUrl first("https://assets.test/frequent"), second("https://assets.test/older"), third("https://assets.test/new");
+        cache.source(first); QTRY_VERIFY(!cache.cached(first).isEmpty());
+        const auto firstLocal = cache.source(first);
+        QTest::qWait(5);
+        cache.source(second); QTRY_VERIFY(!cache.cached(second).isEmpty());
+        QTest::qWait(5);
+        QCOMPARE(cache.source(first), firstLocal);
+        QTest::qWait(5);
+        cache.source(third); QTRY_VERIFY(!cache.cached(third).isEmpty());
+        QCOMPARE(cache.cached(first), firstLocal);
+        QVERIFY(cache.cached(second).isEmpty());
+        QVERIFY(cache.bytes() <= cache.limit());
+        QCOMPARE(network.requests, 3);
+    }
 };
 QTEST_GUILESS_MAIN(MediaCacheTest)
 #include "MediaCacheTest.moc"

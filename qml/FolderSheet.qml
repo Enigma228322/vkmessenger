@@ -19,8 +19,8 @@ Dialog {
     property var peers: []
     readonly property var controller: messenger.folders
     background: Rectangle { radius: 18; color: sheet.palette.window; border.color: sheet.palette.mid }
-    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: sheet.reducedMotion ? 0 : 150 } }
-    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: sheet.reducedMotion ? 0 : 100 } }
+    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: sheet.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
+    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: sheet.reducedMotion ? 0 : 180; easing.type: Easing.OutCubic } }
     function show() { editing = false; open(); controller.refresh() }
     function edit(folder) {
         folderId = folder ? folder.id : ""

@@ -16,7 +16,7 @@ FolderController::FolderController(Messenger *messenger) : QObject(messenger), m
 void FolderController::reset(bool clear)
 {
     ++m_epoch; m_busy = m_refreshPending = false; m_error.clear();
-    if (clear) { m_catalog = {}; m_items.clear(); m_selected.clear(); }
+    if (clear) { m_catalog = {}; m_items.clear(); m_membership.clear(); m_selected.clear(); }
     ++m_revision; emit changed();
 }
 void FolderController::setSelected(const QString &id)
@@ -36,12 +36,24 @@ void FolderController::restore(const QJsonObject &catalog)
 void FolderController::publish()
 {
     m_items.clear();
+    m_membership.clear();
     for (const auto &value : m_catalog.value("items").toArray()) {
         const auto folder = value.toObject(); auto row = safeJson(folder).toMap();
         row.insert("id", folderId(folder.value("id"))); row.insert("editable", editable(folder));
         QStringList peers;
         for (const auto &peer : folder.value("included_peer_ids").toArray()) peers.append(folderId(peer));
         row.insert("peers", peers); m_items.append(row);
+        Membership membership;
+        for (const auto &peer : peers) membership.included.insert(peer);
+        for (const auto &peer : folder.value("excluded_peer_ids").toArray()) membership.excluded.insert(folderId(peer));
+        const auto lists = folder.value("included_lists").toArray();
+        for (const auto &entry : m_catalog.value("included_lists_info").toArray()) {
+            const auto list = entry.toObject();
+            if (!lists.contains(list.value("type"))) continue;
+            const auto filter = list.value("filter").toObject();
+            membership.filters.append({filter.value("and").toInteger(), filter.value("xor").toInteger()});
+        }
+        m_membership.insert(row.value("id").toString(), std::move(membership));
     }
     if (!m_selected.isEmpty() && get(m_selected).isEmpty()) m_selected.clear();
     ++m_revision; emit changed();
@@ -54,20 +66,13 @@ QVariantMap FolderController::get(const QString &id) const
 bool FolderController::contains(const QString &id, const QString &peer) const
 {
     if (id.isEmpty()) return true;
-    for (const auto &value : m_catalog.value("items").toArray()) {
-        const auto folder = value.toObject(); if (folderId(folder.value("id")) != id) continue;
-        for (const auto &excluded : folder.value("excluded_peer_ids").toArray()) if (folderId(excluded) == peer) return false;
-        for (const auto &included : folder.value("included_peer_ids").toArray()) if (folderId(included) == peer) return true;
-        const auto includedLists = folder.value("included_lists").toArray();
-        const auto flags = m_messenger->m_rawConversations.value(peer).value("conversation").toObject().value("peer_flags").toInteger();
-        for (const auto &listValue : m_catalog.value("included_lists_info").toArray()) {
-            const auto list = listValue.toObject();
-            if (!includedLists.contains(list.value("type"))) continue;
-            const auto filter = list.value("filter").toObject();
-            if (((flags & filter.value("and").toInteger()) ^ filter.value("xor").toInteger()) == 0) return true;
-        }
-        return false;
-    }
+    const auto folder = m_membership.constFind(id);
+    if (folder == m_membership.cend() || folder->excluded.contains(peer)) return false;
+    if (folder->included.contains(peer)) return true;
+    if (folder->filters.isEmpty()) return false;
+    const auto flags = m_messenger->m_rawConversations.value(peer).value("conversation").toObject().value("peer_flags").toInteger();
+    for (const auto &[mask, expected] : folder->filters)
+        if (((flags & mask) ^ expected) == 0) return true;
     return false;
 }
 void FolderController::save()
