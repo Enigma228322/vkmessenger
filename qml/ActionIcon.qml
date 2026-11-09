@@ -82,6 +82,40 @@ Canvas {
             c.beginPath(); c.arc(12,12,5,0.3,Math.PI-0.3); c.stroke()
         } else if (kind === "leave") {
             path([[10,3],[3,3],[3,21],[10,21]]); path([[8,12],[21,12],[17,8]]); path([[21,12],[17,16]])
+        } else if (kind === "chat") {
+            c.beginPath(); c.moveTo(12,3); c.bezierCurveTo(1,3,0,17,8,19); c.lineTo(4,22); c.lineTo(11,20); c.bezierCurveTo(25,20,25,3,12,3); c.stroke()
+        } else if (kind === "send") {
+            path([[12,3],[4,12],[9,12],[9,21],[15,21],[15,12],[20,12]],true)
+        } else if (kind === "play") {
+            path([[8,4],[20,12],[8,20]],true)
+        } else if (kind === "pause") {
+            path([[8,5],[8,19]]); path([[16,5],[16,19]])
+        } else if (kind === "chevronLeft" || kind === "chevronRight") {
+            if (kind === "chevronRight") { c.translate(24,0); c.scale(-1,1) }
+            path([[15,5],[8,12],[15,19]])
+        } else if (kind === "download") {
+            path([[12,3],[12,16],[7,11]]); path([[12,16],[17,11]]); path([[4,17],[4,21],[20,21],[20,17]])
+        } else if (kind === "expand" || kind === "collapse") {
+            if (kind === "expand") { path([[9,3],[3,3],[3,9]]); path([[15,3],[21,3],[21,9]]); path([[3,15],[3,21],[9,21]]); path([[15,21],[21,21],[21,15]]) }
+            else { path([[3,9],[9,9],[9,3]]); path([[15,3],[15,9],[21,9]]); path([[3,15],[9,15],[9,21]]); path([[15,21],[15,15],[21,15]]) }
+        } else if (kind === "volume" || kind === "volumeOff") {
+            path([[3,9],[7,9],[12,5],[12,19],[7,15],[3,15]],true)
+            if (kind === "volumeOff") { path([[16,9],[22,15]]); path([[22,9],[16,15]]) }
+            else { c.beginPath(); c.arc(12,12,6,-0.8,0.8); c.stroke(); c.beginPath(); c.arc(12,12,10,-0.7,0.7); c.stroke() }
+        } else if (kind === "zoomIn" || kind === "zoomOut") {
+            c.beginPath(); c.arc(10,10,6,0,Math.PI*2); c.stroke(); path([[15,15],[21,21]]); path([[7,10],[13,10]])
+            if (kind === "zoomIn") path([[10,7],[10,13]])
+        } else if (kind === "fit") {
+            c.strokeRect(3,5,18,14); path([[7,12],[17,12]]); path([[9,10],[7,12],[9,14]]); path([[15,10],[17,12],[15,14]])
+        } else if (kind === "skipBack" || kind === "skipForward") {
+            if (kind === "skipForward") { c.translate(24,0); c.scale(-1,1) }
+            c.beginPath(); c.arc(12,13,8,-2.1,2.8); c.stroke(); path([[4,3],[4,8],[9,8]])
+        } else if (kind === "close") {
+            path([[6,6],[18,18]]); path([[18,6],[6,18]])
+        } else if (kind === "chevronDown") {
+            path([[5,9],[12,16],[19,9]])
+        } else if (kind === "menu") {
+            path([[4,6],[20,6]]); path([[4,12],[20,12]]); path([[4,18],[20,18]])
         } else if (kind === "retry") {
             c.beginPath(); c.arc(12,12,8,0.4,5.3); c.stroke(); path([[12,3],[17,5],[17,0]])
         } else {

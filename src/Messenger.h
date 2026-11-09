@@ -39,27 +39,84 @@ public:
     void reconcile(const QVariantList &value) {
         if (rows == value) return;
         const auto identity = [](const QVariant &value) { const auto row = value.toMap(); return row.value("identity", row.value("id")); };
-        for (int i = 0; i < value.size(); ++i) {
-            const auto key = identity(value[i]);
-            if (i < rows.size() && identity(rows[i]) == key) {
-                if (rows[i] != value[i]) { rows[i] = value[i]; emit dataChanged(index(i), index(i)); }
-                continue;
+        QList<QString> keys, targetKeys;
+        QSet<QString> existing, wanted;
+        const auto collect = [&identity](const QVariantList &items, QList<QString> &keys, QSet<QString> &unique) {
+            keys.reserve(items.size());
+            for (const auto &item : items) {
+                const auto key = identity(item);
+                // Keep the original reconciliation semantics for incomplete or
+                // ambiguous identities. Production message and peer IDs are strings.
+                if (key.metaType() != QMetaType::fromType<QString>() || key.toString().isEmpty() || unique.contains(key.toString())) return false;
+                keys.append(key.toString()); unique.insert(keys.last());
             }
-            int found = -1;
-            for (int j = i + 1; j < rows.size(); ++j)
-                if (identity(rows[j]) == key) { found = j; break; }
-            if (found >= 0) {
-                beginMoveRows({}, found, found, {}, i);
-                rows.insert(i, rows.takeAt(found));
-                endMoveRows();
-                if (rows[i] != value[i]) { rows[i] = value[i]; emit dataChanged(index(i), index(i)); }
-            } else {
-                beginInsertRows({}, i, i); rows.insert(i, value[i]); endInsertRows();
+            return true;
+        };
+        if (collect(rows, keys, existing) && collect(value, targetKeys, wanted)) {
+            // Remove missing identities before moving retained rows. Removing an
+            // old history prefix must not move every surviving message separately.
+            for (int end = keys.size() - 1; end >= 0;) {
+                if (wanted.contains(keys[end])) { --end; continue; }
+                int start = end;
+                while (start > 0 && !wanted.contains(keys[start - 1])) --start;
+                beginRemoveRows({}, start, end);
+                rows.remove(start, end - start + 1); keys.remove(start, end - start + 1);
+                endRemoveRows(); end = start - 1;
             }
-        }
-        if (rows.size() > value.size()) {
-            beginRemoveRows({}, value.size(), rows.size() - 1);
-            rows.remove(value.size(), rows.size() - value.size()); endRemoveRows();
+            int dirtyFirst = -1, dirtyLast = -1;
+            const auto flushChanges = [this, &dirtyFirst, &dirtyLast] {
+                if (dirtyFirst < 0) return;
+                emit dataChanged(index(dirtyFirst), index(dirtyLast));
+                dirtyFirst = dirtyLast = -1;
+            };
+            for (int i = 0; i < value.size();) {
+                if (i >= keys.size() || keys[i] != targetKeys[i]) {
+                    flushChanges();
+                    if (!existing.contains(targetKeys[i])) {
+                        int end = i + 1;
+                        while (end < targetKeys.size() && !existing.contains(targetKeys[end])) ++end;
+                        beginInsertRows({}, i, end - 1);
+                        if (i == rows.size()) { rows += value.sliced(i, end - i); keys += targetKeys.sliced(i, end - i); }
+                        else { rows = rows.first(i) + value.sliced(i, end - i) + rows.sliced(i); keys = keys.first(i) + targetKeys.sliced(i, end - i) + keys.sliced(i); }
+                        endInsertRows(); i = end; continue;
+                    }
+                    const int found = keys.indexOf(targetKeys[i], i + 1);
+                    beginMoveRows({}, found, found, {}, i);
+                    rows.insert(i, rows.takeAt(found)); keys.move(found, i);
+                    endMoveRows();
+                }
+                if (rows[i] != value[i]) {
+                    if (dirtyLast + 1 != i) flushChanges();
+                    rows[i] = value[i];
+                    if (dirtyFirst < 0) dirtyFirst = i;
+                    dirtyLast = i;
+                }
+                ++i;
+            }
+            flushChanges();
+        } else {
+            for (int i = 0; i < value.size(); ++i) {
+                const auto key = identity(value[i]);
+                if (i < rows.size() && identity(rows[i]) == key) {
+                    if (rows[i] != value[i]) { rows[i] = value[i]; emit dataChanged(index(i), index(i)); }
+                    continue;
+                }
+                int found = -1;
+                for (int j = i + 1; j < rows.size(); ++j)
+                    if (identity(rows[j]) == key) { found = j; break; }
+                if (found >= 0) {
+                    beginMoveRows({}, found, found, {}, i);
+                    rows.insert(i, rows.takeAt(found));
+                    endMoveRows();
+                    if (rows[i] != value[i]) { rows[i] = value[i]; emit dataChanged(index(i), index(i)); }
+                } else {
+                    beginInsertRows({}, i, i); rows.insert(i, value[i]); endInsertRows();
+                }
+            }
+            if (rows.size() > value.size()) {
+                beginRemoveRows({}, value.size(), rows.size() - 1);
+                rows.remove(value.size(), rows.size() - value.size()); endRemoveRows();
+            }
         }
         ++m_revision; emit revisionChanged();
     }
@@ -84,6 +141,7 @@ class Messenger : public QObject {
     friend class FolderController;
     Q_PROPERTY(ItemModel *conversations READ conversations CONSTANT)
     Q_PROPERTY(ConversationFilterModel *filteredConversations READ filteredConversations CONSTANT)
+    Q_PROPERTY(ConversationPickerModel *conversationChoices READ conversationChoices CONSTANT)
     Q_PROPERTY(ItemModel *messages READ messages CONSTANT)
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
     Q_PROPERTY(bool demo READ demo NOTIFY changed)
@@ -139,6 +197,7 @@ public:
     ~Messenger() override;
     ItemModel *conversations() { return &m_conversations; }
     ConversationFilterModel *filteredConversations() { return &m_filteredConversations; }
+    ConversationPickerModel *conversationChoices() { return &m_conversationChoices; }
     ItemModel *messages() { return &m_messages; }
     bool connected() const { return m_connected; }
     bool demo() const { return m_demo; }
@@ -183,6 +242,8 @@ public:
     MediaCache *media() { return &m_media; }
     VoiceRecorder *recorder() { return &m_recorder; }
     QVariantMap conversationProfile() const;
+    Q_INVOKABLE QVariantMap peerProfile(const QString &peer) const;
+    Q_INVOKABLE void loadPeerProfile(const QString &peer);
     bool isChat() const { return m_peer.toLongLong() > 2000000000; }
     bool canManageChat() const {
         const auto settings = m_rawConversations.value(m_peer).value("conversation").toObject().value("chat_settings").toObject();
@@ -211,6 +272,8 @@ public:
     Q_INVOKABLE void loadOlder();
     Q_INVOKABLE void loadGap(const QString &first, const QString &last);
     Q_INVOKABLE void jumpToEnd();
+    Q_INVOKABLE QString latestMessageCmid() const;
+    Q_INVOKABLE int newIncomingMessageCount(const QString &afterCmid) const;
     Q_INVOKABLE void markVisibleRead(const QString &cmid);
     Q_INVOKABLE void execute(const QString &method, const QVariantMap &parameters);
     Q_INVOKABLE QVariantMap methodDefaults(const QString &cmid = {}) const;
@@ -251,7 +314,12 @@ private:
     void fetchDiffPage(const std::shared_ptr<DiffTransaction> &transaction, const QString &source = {});
     void applyDiff(const DiffTransaction &transaction);
     void rebuildConversations();
-    void publishHistory();
+    void publishHistory(bool replaceModel = false);
+    void loadPeerProfiles(const QStringList &peers, bool groups);
+    void queueMissingProfiles(const QVariantList &rows);
+    void retainRecentHistory(const QString &peer);
+    void trimInactiveHistories();
+    void trimHistory(const QString &peer, int limit);
     void acceptSession(QJsonObject session);
     void beginTokenLogin(const QString &token, const QString &group = {}, const QJsonObject &context = {});
     QString groupId() const { return LongPoll::cursor(m_session.value("group_id")).isEmpty() ? QString("0") : LongPoll::cursor(m_session.value("group_id")); }
@@ -293,9 +361,18 @@ private:
     QTimer m_sync, m_refresh, m_activityExpiry, m_toastTimer;
     ItemModel m_conversations, m_messages;
     ConversationFilterModel m_filteredConversations{&m_conversations, &m_folders, this};
+    ConversationPickerModel m_conversationChoices{&m_conversations, this};
     QJsonObject m_session;
     QHash<QString, QJsonObject> m_rawConversations, m_peers;
+    QHash<QString, qint64> m_profileFetchedAt;
+    QSet<QString> m_profilesLoading, m_pendingProfilePeers;
+    QTimer m_profileTimer;
     QHash<QString, QMap<qint64, QJsonObject>> m_histories;
+    QStringList m_recentHistoryPeers;
+    struct PresentedMessage { QJsonObject raw; QVariantMap value; };
+    mutable QHash<QString, QMap<qint64, PresentedMessage>> m_presentedMessages;
+    struct RecentView { QVariantList rows; quint64 revision; qint64 inRead, outRead; };
+    QHash<QString, RecentView> m_recentViews;
     QHash<QString, QHash<qint64, QString>> m_localIdentities;
     QHash<QString, qint64> m_lastCmid, m_inRead, m_readPending;
     QHash<QString, QSet<qint64>> m_contentDirty;

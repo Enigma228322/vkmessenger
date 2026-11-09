@@ -29,6 +29,8 @@ public:
     Q_INVOKABLE void retry(const QUrl &remote);
     Q_INVOKABLE void clear();
 signals:
+    void sourceUpdated(const QUrl &remote);
+    void sourcesReset();
     void changed();
 private:
     struct Entry { QString path; qint64 size = 0, accessed = 0; };

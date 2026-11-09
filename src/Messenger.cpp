@@ -20,6 +20,14 @@
 #include <limits>
 
 static QString id(const QJsonValue &value) { return QString::number(value.toInteger()); }
+static QString avatarSource(const QJsonObject &person, bool large = false)
+{
+    for (const auto &key : large ? QStringList{"photo_200", "photo_100", "photo_50"} : QStringList{"photo_100", "photo_200", "photo_50"}) {
+        const auto source = person.value(key).toString(); if (!source.isEmpty()) return source;
+    }
+    return {};
+}
+
 static QString preview(const QJsonObject &object)
 {
     const auto text = object.value("text").toString();
@@ -63,6 +71,12 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
       }, this, network), m_api(network)
 {
     m_persistentSession = persistentSession;
+    m_profileTimer.setSingleShot(true); m_profileTimer.setInterval(16);
+    connect(&m_profileTimer, &QTimer::timeout, this, [this] {
+        if (m_loading && !m_fetchingHistory) { m_profileTimer.start(); return; }
+        const auto peers = m_pendingProfilePeers.values(); m_pendingProfilePeers.clear();
+        loadPeerProfiles(peers, false);
+    });
     m_draftTimer.setSingleShot(true);
     m_draftTimer.setInterval(250);
     connect(&m_draftTimer, &QTimer::timeout, this, &Messenger::flushDrafts);
@@ -130,7 +144,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
             return;
         }
         ++m_historyGeneration;
-        m_api.cancel();
+        m_api.cancel(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop();
         m_outboxSending = false;
         for (auto &pending : m_outgoing) if (pending.value("state").toString() == "sending") pending.insert("state", "uncertain");
         m_actions.resetAccount(); m_profileActions.cancelPending(); m_folders.reset(false);
@@ -319,7 +333,7 @@ void Messenger::logout()
     m_restoringTransfers = false;
     m_recorder.discard();
     m_sync.stop();
-    m_api.cancel();
+    m_api.cancel(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop();
     m_refresh.stop();
     m_token.clear();
     m_pendingPeer.clear(); m_pendingText.clear(); m_pendingRandomId.clear();
@@ -333,7 +347,7 @@ void Messenger::logout()
     m_activity.clear(); m_online.clear(); m_outRead.clear(); m_unreadCount = 0;
     m_presenceRevision.clear(); m_eventRevision = 0; m_syncBlocked = false; m_publicMessages = false;
     m_messagesAccessError.clear();
-    m_rawConversations.clear(); m_peers.clear(); m_histories.clear(); m_localIdentities.clear();
+    m_rawConversations.clear(); m_peers.clear(); m_profileFetchedAt.clear(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop(); m_histories.clear(); m_presentedMessages.clear(); m_recentViews.clear(); m_recentHistoryPeers.clear(); m_localIdentities.clear();
     m_lastCmid.clear(); m_inRead.clear(); m_readPending.clear(); m_older.clear(); m_newer.clear();
     m_contentDirty.clear(); m_contentRevision.clear();
     m_verifiedRanges.clear();
@@ -415,20 +429,70 @@ void Messenger::drainSync()
     }
 }
 
-QVariantMap Messenger::conversationProfile() const
+QVariantMap Messenger::conversationProfile() const { return peerProfile(m_peer); }
+
+QVariantMap Messenger::peerProfile(const QString &peer) const
 {
-    auto result = safeJson(m_peers.value(m_peer)).toMap();
-    const auto conversation = m_rawConversations.value(m_peer).value("conversation").toObject();
+    const auto entity = m_peers.value(peer);
+    auto result = safeJson(entity).toMap();
+    const auto conversation = m_rawConversations.value(peer).value("conversation").toObject();
     const auto chat = conversation.value("chat_settings").toObject();
+    QString title = chat.value("title").toString(entity.value("name").toString());
+    if (title.isEmpty()) title = (entity.value("first_name").toString() + ' ' + entity.value("last_name").toString()).trimmed();
+    result.insert("title", title);
     result.insert("members_count", chat.value("members_count").toInt());
-    for (const auto &value : m_conversations.rows) {
-        const auto row = value.toMap();
-        if (row.value("peer").toString() != m_peer) continue;
-        result.insert("muted", row.value("muted"));
-        result.insert("avatar", result.value("photo_200", row.value("avatar")));
-        break;
-    }
+    const auto push = conversation.value("push_settings").toObject();
+    result.insert("muted", push.value("disabled_forever").toBool() || push.value("disabled_until").toInteger() == -1
+        || push.value("disabled_until").toInteger() > QDateTime::currentSecsSinceEpoch());
+    QString avatar = avatarSource(entity, true);
+    if (!chat.isEmpty()) avatar = chat.value("photo").toObject().value("photo_100").toString(avatar);
+    result.insert("avatar", avatar);
+    if (m_online.contains(peer)) result.insert("online", m_online.value(peer));
     return result;
+}
+void Messenger::loadPeerProfile(const QString &peer) { loadPeerProfiles({peer}, peer.startsWith('-')); }
+
+void Messenger::loadPeerProfiles(const QStringList &peers, bool groups)
+{
+    if (!m_connected || m_demo || m_offline) return;
+    QStringList requested, ids;
+    const auto now = QDateTime::currentSecsSinceEpoch();
+    for (const auto &peer : peers) {
+        bool valid = false; const auto number = peer.toLongLong(&valid);
+        if (!valid || number == 0 || number <= -2000000000LL || number >= 2000000000LL || (number < 0) != groups
+            || m_profilesLoading.contains(peer) || now - m_profileFetchedAt.value(peer) < 60) continue;
+        m_profilesLoading.insert(peer); requested.append(peer); ids.append(QString::number(qAbs(number)));
+        if (ids.size() >= 100) break;
+    }
+    if (ids.isEmpty()) return;
+    const auto generation = m_generation;
+    const auto presenceRevision = m_eventRevision;
+    api(groups ? "groups.getById" : "users.get", {{groups ? "group_ids" : "user_ids", ids.join(',')}, {"fields", "photo_100,photo_200,domain,online,last_seen"}},
+        [this, requested, groups, generation, presenceRevision](const QJsonValue &value, const QString &error) {
+        if (generation != m_generation) return;
+        for (const auto &peer : requested) { m_profilesLoading.remove(peer); m_profileFetchedAt[peer] = QDateTime::currentSecsSinceEpoch(); }
+        if (!error.isEmpty()) return;
+        const auto rows = value.isArray() ? value.toArray() : value.toObject().value("groups").toArray();
+        bool updated = false;
+        for (const auto &row : rows) {
+            const auto person = row.toObject(); const auto peer = QString::number(person.value("id").toInteger() * (groups ? -1 : 1));
+            if (!requested.contains(peer)) continue;
+            auto entity = m_peers.value(peer);
+            for (auto it = person.begin(); it != person.end(); ++it) entity[it.key()] = it.value();
+            m_peers[peer] = entity;
+            if (person.contains("online") && m_presenceRevision.value(peer) <= presenceRevision) m_online[peer] = person.value("online").toInt() == 1;
+            updated = true;
+        }
+        if (updated) {
+            m_recentViews.clear();
+            rebuildConversations();
+            if (requested.contains(m_peer)) {
+                const auto title = peerProfile(m_peer).value("title").toString();
+                if (!title.isEmpty()) m_title = title;
+            }
+            publishHistory(); emit changed();
+        }
+    });
 }
 
 QString Messenger::peerActivity() const
@@ -682,7 +746,7 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
 {
     if (transaction.full) {
         m_rawConversations.clear();
-        m_histories.clear(); m_older.clear(); m_newer.clear();
+        m_histories.clear(); m_presentedMessages.clear(); m_recentViews.clear(); m_recentHistoryPeers.clear(); m_older.clear(); m_newer.clear();
         m_verifiedRanges.clear();
     }
     for (const auto &page : transaction.pages) {
@@ -740,10 +804,7 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
     rebuildConversations();
     m_folders.conversationsChanged();
     reconcileOutbox();
-    for (auto it = m_histories.begin(); it != m_histories.end(); ++it) {
-        if (it.key() == m_peer) continue;
-        while (it->size() > 1) it->erase(it->begin());
-    }
+    trimInactiveHistories();
     publishHistory();
 }
 
@@ -793,17 +854,26 @@ QVariantMap Messenger::message(const QJsonObject &object) const
     const auto sender = m_peers.value(id(object.value("from_id")));
     QString name = sender.value("name").toString();
     if (name.isEmpty()) name = (sender.value("first_name").toString() + " " + sender.value("last_name").toString()).trimmed();
+    auto &prepared = m_presentedMessages[m_peer][cmid];
+    if (prepared.raw != object) { prepared.raw = object; prepared.value = safeJson(object).toMap(); }
+    const auto &raw = prepared.value;
+    const auto reply = object.value("reply_message").toObject();
+    const auto replyPerson = m_peers.value(id(reply.value("from_id")));
+    QString replyAuthor = replyPerson.value("name").toString((replyPerson.value("first_name").toString() + ' ' + replyPerson.value("last_name").toString()).trimmed());
+    if (reply.value("from_id").toInteger() != 0 && reply.value("from_id").toInteger() == m_session.value("user_id").toInteger()) replyAuthor = "Вы";
+    if (replyAuthor.isEmpty()) replyAuthor = "Сообщение";
     return {{"id", QString::number(cmid)}, {"identity", m_localIdentities.value(m_peer).value(cmid, QString::number(cmid))}, {"cmid", QString::number(cmid)}, {"globalId", id(object.value("id"))}, {"text", preview(object)},
         {"outgoing", object.value("out").toInt() == 1},
         {"read", object.value("out").toInt() == 1 && cmid > 0 && cmid <= m_outRead.value(m_peer)},
-        {"raw", safeJson(object)}, {"important", object.value("important").toBool()},
+        {"raw", raw}, {"replyAuthor", replyAuthor}, {"important", object.value("important").toBool()},
         {"edited", object.value("update_time").toInteger() > 0},
-        {"attachments", safeJson(object.value("attachments"))},
+        {"attachments", raw.value("attachments")},
         {"time", QDateTime::fromSecsSinceEpoch(object.value("date").toInteger()).toString("dd.MM · HH:mm")},
-        {"sender", name.isEmpty() ? id(object.value("from_id")) : name}, {"senderAvatar", sender.value("photo_100").toString()}};
+        {"sender", name.isEmpty() ? id(object.value("from_id")) : name}, {"senderPeer", id(object.value("from_id"))},
+        {"senderAvatar", avatarSource(sender)}};
 }
 
-void Messenger::publishHistory()
+void Messenger::publishHistory(bool replaceModel)
 {
     if (m_demo || m_peer.isEmpty()) return;
     QVariantList rows;
@@ -831,31 +901,98 @@ void Messenger::publishHistory()
             {"sentAt", pending.value("created").toInteger()}, {"sender", "Вы"}, {"delivery", state}, {"deliveryError", pending.value("error").toString()},
             {"raw", safeJson(pending.value("preview"))}, {"attachments", safeJson(pending.value("preview").toObject().value("attachments"))}});
     }
+    if (auto cache = m_presentedMessages.find(m_peer); cache != m_presentedMessages.end()) {
+        const auto &history = m_histories[m_peer];
+        for (auto it = cache->begin(); it != cache->end();) {
+            if (!history.contains(it.key())) it = cache->erase(it); else ++it;
+        }
+    }
     emit historyAboutToChange();
-    m_messages.reconcile(TimelinePresentation::decorate(rows, m_inRead.value(m_peer)));
+    const auto decorated = TimelinePresentation::decorate(rows, m_inRead.value(m_peer));
+    if (!m_newer.value(m_peer) && decorated.size() > 1 && decorated.size() <= 200
+        && std::none_of(decorated.cbegin(), decorated.cend(), [](const QVariant &value) { return value.toMap().value("local").toBool(); }))
+        m_recentViews[m_peer] = {decorated, m_contentRevision.value(m_peer), m_inRead.value(m_peer), m_outRead.value(m_peer)};
+    else m_recentViews.remove(m_peer);
+    if (replaceModel) m_messages.replace(decorated);
+    else m_messages.reconcile(decorated);
     emit historyChanged();
+    queueMissingProfiles(decorated);
+}
+
+void Messenger::queueMissingProfiles(const QVariantList &rows)
+{
+    if (!isChat() || !m_connected || m_demo || m_offline) return;
+    for (const auto &value : rows) {
+        const auto row = value.toMap();
+        const auto peer = row.value("senderPeer").toString();
+        if (peer.toLongLong() > 0 && row.value("senderAvatar").toString().isEmpty()) m_pendingProfilePeers.insert(peer);
+    }
+    if (!m_pendingProfilePeers.isEmpty()) m_profileTimer.start();
+}
+
+void Messenger::trimHistory(const QString &peer, int limit)
+{
+    auto it = m_histories.find(peer);
+    if (it == m_histories.end()) return;
+    if (it->size() > limit) m_older[peer] = true;
+    while (it->size() > limit) it->erase(it->begin());
+    if (limit == 1) { m_verifiedRanges.remove(peer); m_presentedMessages.remove(peer); m_recentViews.remove(peer); }
+    else if (auto cache = m_presentedMessages.find(peer); cache != m_presentedMessages.end()) {
+        while (!cache->isEmpty() && (cache->size() > limit || (!it->isEmpty() && cache->firstKey() < it->firstKey()))) cache->erase(cache->begin());
+    }
+}
+void Messenger::retainRecentHistory(const QString &peer)
+{
+    if (peer.isEmpty()) return;
+    m_recentHistoryPeers.removeAll(peer);
+    const bool retain = !m_newer.value(peer) && m_histories.value(peer).size() > 1;
+    if (retain) m_recentHistoryPeers.prepend(peer);
+    trimHistory(peer, retain ? 200 : 1);
+    while (m_recentHistoryPeers.size() > 6) trimHistory(m_recentHistoryPeers.takeLast(), 1);
+}
+void Messenger::trimInactiveHistories()
+{
+    for (auto it = m_histories.begin(); it != m_histories.end(); ++it)
+        if (it.key() != m_peer) trimHistory(it.key(), m_recentHistoryPeers.contains(it.key()) ? 200 : 1);
 }
 
 void Messenger::selectConversation(const QString &peer, const QString &title)
 {
     if (m_peer == peer) return;
+    m_pendingProfilePeers.clear(); m_profileTimer.stop();
     m_localIdentities.remove(m_peer);
-    if (!m_demo && m_histories.value(m_peer).size() > 1) {
-        auto &old = m_histories[m_peer];
-        const auto last = old.last(); const auto key = old.lastKey();
-        old.clear(); old.insert(key, last);
-        m_verifiedRanges.remove(m_peer); m_contentDirty.remove(m_peer);
+    if (!m_demo) {
+        if (m_recentHistoryPeers.removeAll(peer)) m_recentHistoryPeers.prepend(peer);
+        retainRecentHistory(m_peer);
     }
     ++m_historyGeneration;
     m_peer = peer; m_title = title;
-    m_messages.replace({});
     m_fetchingHistory = false;
     m_historyDirty = false;
     m_loading = false;
     m_historyError.clear();
     m_replyMessage = m_drafts.value(peer).value("reply").toObject().toVariantMap();
     if (m_demo) m_messages.replace(TimelinePresentation::decorate(m_demoHistory.value(peer)));
-    else { publishHistory(); readCachedHistory(peer); }
+    else {
+        const bool warm = m_recentHistoryPeers.contains(peer) && m_histories.value(peer).size() > 1 && !m_newer.value(peer);
+        const auto view = m_recentViews.constFind(peer);
+        if (warm && view != m_recentViews.cend() && view->revision == m_contentRevision.value(peer)
+            && view->inRead == m_inRead.value(peer) && view->outRead == m_outRead.value(peer)) {
+            const auto cachedRows = view->rows;
+            emit historyAboutToChange();
+            m_messages.replace(cachedRows);
+            emit historyChanged();
+            queueMissingProfiles(cachedRows);
+        } else publishHistory(true);
+        if (warm) {
+            if (!m_offline) {
+                const auto generation = m_historyGeneration;
+                QTimer::singleShot(0, this, [this, peer, generation] {
+                    if (m_peer == peer && m_historyGeneration == generation) fetchHistory(false, true);
+                });
+            }
+        } else readCachedHistory(peer);
+    }
     emit draftChanged();
     emit changed();
 }
@@ -972,7 +1109,7 @@ void Messenger::fetchPublicHistory(const QString &peer, qint64 cmid, int offset,
     const auto generation = m_generation, historyGeneration = m_historyGeneration;
     auto load = [this, peer, offset, generation, historyGeneration, callback](const QString &messageId) {
         if (generation != m_generation || historyGeneration != m_historyGeneration) return;
-        Form params{{"peer_id", peer}, {"count", "50"}, {"extended", "1"}, {"fields", "photo_100"}, {"group_id", groupId()}};
+        Form params{{"peer_id", peer}, {"count", "50"}, {"extended", "1"}, {"fields", "photo_100,photo_200,domain,online,last_seen"}, {"group_id", groupId()}};
         if (!messageId.isEmpty()) { params.append({"start_message_id", messageId}); params.append({"offset", QString::number(offset)}); }
         api("messages.getHistory", params, [peer, callback](const QJsonValue &value, const QString &error) {
             if (!error.isEmpty()) { callback({}, error); return; }
@@ -1010,6 +1147,16 @@ void Messenger::jumpToEnd()
     if (m_demo || (!hasNewer() && !m_messages.rows.isEmpty() && m_historyError.isEmpty())) { emit scrollToEnd(); return; }
     if (m_offline && !m_loading) { m_histories[m_peer].clear(); m_verifiedRanges.remove(m_peer); readCachedHistory(m_peer); return; }
     if (!m_loading) fetchHistory(false, true);
+}
+
+QString Messenger::latestMessageCmid() const
+{
+    return TimelinePresentation::latestCmid(m_messages.rows);
+}
+
+int Messenger::newIncomingMessageCount(const QString &afterCmid) const
+{
+    return TimelinePresentation::incomingAfter(m_messages.rows, afterCmid);
 }
 
 void Messenger::markVisibleRead(const QString &cmidString)
@@ -1112,7 +1259,7 @@ QVariantMap Messenger::methodDefaults(const QString &cmid) const
 {
     QVariantMap values{{"peer_id", m_peer}, {"peer_ids", m_peer}, {"cmid", cmid}, {"cmids", cmid},
         {"conversation_message_ids", cmid}, {"extended", "1"}, {"count", "50"}, {"group_id", groupId()},
-        {"lp_version", "21"}, {"fields", "photo_100"}, {"user_id", LongPoll::cursor(m_session.value("user_id"))}};
+        {"lp_version", "21"}, {"fields", "photo_100,photo_200,domain,online,last_seen"}, {"user_id", LongPoll::cursor(m_session.value("user_id"))}};
     if (m_peer.toLongLong() > 2000000000) values["chat_id"] = QString::number(m_peer.toLongLong() - 2000000000);
     const auto raw = m_histories.value(m_peer).value(cmid.toLongLong());
     if (!raw.isEmpty()) {
@@ -1558,7 +1705,7 @@ void Messenger::clearHistoryCache()
 {
     if (m_demo || m_account.isEmpty() || m_sending) return;
     m_transfers.pause();
-    ++m_generation; ++m_historyGeneration; m_api.cancel(); m_longPoll.stop(); m_actions.resetAccount(); m_profileActions.resetAccount(); m_folders.reset();
+    ++m_generation; ++m_historyGeneration; m_api.cancel(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop(); m_longPoll.stop(); m_actions.resetAccount(); m_profileActions.resetAccount(); m_folders.reset();
     m_readPending.clear(); m_operationBusy = false; emit operationChanged();
     m_fetchingConversations = m_fetchingHistory = m_loading = false;
     m_outboxSending = false;
@@ -1568,7 +1715,7 @@ void Messenger::clearHistoryCache()
         if (generation != m_generation) return;
         if (!error.isEmpty()) { fail(error); return; }
         ++m_historyGeneration;
-        m_histories.clear(); m_verifiedRanges.clear(); m_older.clear(); m_newer.clear(); m_contentDirty.clear();
+        m_histories.clear(); m_presentedMessages.clear(); m_recentViews.clear(); m_recentHistoryPeers.clear(); m_verifiedRanges.clear(); m_older.clear(); m_newer.clear(); m_contentDirty.clear();
         m_version.clear(); m_needCredentials = true;
         m_fetchingConversations = m_fetchingHistory = m_loading = false;
         m_longPoll.stop();

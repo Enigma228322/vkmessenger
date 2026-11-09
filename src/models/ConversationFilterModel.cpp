@@ -2,6 +2,36 @@
 #include "messaging/FolderController.h"
 #include <QTimer>
 
+ConversationPickerModel::ConversationPickerModel(QAbstractItemModel *source, QObject *parent)
+    : QSortFilterProxyModel(parent) { setSourceModel(source); }
+
+void ConversationPickerModel::setPeopleOnly(bool value)
+{
+    if (m_peopleOnly == value) return;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+#endif
+    m_peopleOnly = value;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    endFilterChange(Direction::Rows);
+#else
+    invalidateFilter();
+#endif
+    emit filterChanged();
+}
+
+bool ConversationPickerModel::filterAcceptsRow(int row, const QModelIndex &parent) const
+{
+    if (!m_peopleOnly) return true;
+    const auto peer = sourceModel()->data(sourceModel()->index(row, 0, parent), Qt::UserRole).toMap().value("peer").toLongLong();
+    return peer > 0 && peer < 2000000000;
+}
+
+QVariantMap ConversationPickerModel::get(int row) const
+{
+    return row >= 0 && row < rowCount() ? data(index(row, 0), Qt::UserRole).toMap() : QVariantMap();
+}
+
 ConversationFilterModel::ConversationFilterModel(QAbstractItemModel *source, FolderController *folders, QObject *parent)
     : QSortFilterProxyModel(parent), m_folders(folders)
 {

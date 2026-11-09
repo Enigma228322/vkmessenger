@@ -16,7 +16,9 @@ class Transfers : public QObject {
     Q_PROPERTY(double progress MEMBER m_progress NOTIFY changed)
     Q_PROPERTY(QString error MEMBER m_error NOTIFY changed)
     Q_PROPERTY(QString filename MEMBER m_filename NOTIFY changed)
-    Q_PROPERTY(QVariantList pending MEMBER m_pending NOTIFY changed)
+    Q_PROPERTY(QString status MEMBER m_status NOTIFY changed)
+    Q_PROPERTY(bool canRetry READ canRetry NOTIFY changed)
+    Q_PROPERTY(QVariantList pending MEMBER m_pending NOTIFY pendingChanged)
     Q_PROPERTY(bool downloading READ downloading NOTIFY changed)
 public:
     using Result = std::function<void(const QJsonValue &, const QString &)>;
@@ -25,12 +27,14 @@ public:
     ~Transfers() override;
     bool busy() const { return m_busy; }
     bool downloading() const { return !m_downloadReply.isNull(); }
+    bool canRetry() const { return (m_paused && !m_queue.isEmpty()) || m_downloadFailed; }
     Q_INVOKABLE void upload(const QUrl &file, const QString &peer, const QString &kind);
     Q_INVOKABLE void cancel();
     Q_INVOKABLE void remove(int index);
     Q_INVOKABLE void download(const QUrl &remote, const QUrl &destination);
     Q_INVOKABLE void cancelDownload();
     Q_INVOKABLE void resume();
+    Q_INVOKABLE void retry();
     bool adoptRecording(const QUrl &file, const QString &peer);
     void pause();
     void setWorkspace(const QString &path) { m_workspace = path; }
@@ -41,6 +45,7 @@ public:
     void reset();
 signals:
     void changed();
+    void pendingChanged();
     void chatPhotoChanged();
     void downloadFinished(const QUrl &file);
 private:
@@ -64,7 +69,10 @@ private:
     quint64 m_generation = 0, m_downloadGeneration = 0;
     bool m_busy = false;
     double m_progress = 0;
-    QString m_error, m_filename;
+    QString m_error, m_filename, m_status;
+    int m_postRetries = 0;
+    QUrl m_downloadRemote, m_downloadDestination;
+    bool m_downloadFailed = false;
     QString m_workspace;
     bool m_paused = false;
     std::shared_ptr<std::atomic_bool> m_stageCancelled;

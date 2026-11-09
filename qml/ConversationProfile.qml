@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Effects
+import "PhotoLayout.js" as PhotoLayout
 
 Drawer {
     id: panel
@@ -11,18 +11,32 @@ Drawer {
     required property var client
     property string peer: ""
     property string peerTitle: ""
-    property bool chat: client.isChat
-    property bool manage: client.canManageChat
-    readonly property var info: client.conversationProfile
+    property bool person: false
+    readonly property bool chat: !person && Number(peer) > 2000000000
+    readonly property bool manage: chat && peer === client.selectedPeer && client.canManageChat
+    property var personSeed: ({})
+    readonly property var info: {
+        client.title; client.conversations.revision
+        return person ? Object.assign({}, personSeed, client.peerProfile(peer)) : client.conversationProfile
+    }
+    readonly property string displayTitle: person ? info.title || peerTitle : peerTitle
     property int loadedMemberCount: 0
     readonly property int memberCount: controller.memberCount || loadedMemberCount || info.members_count || 0
     property string avatar: ""
     property int section: 0
     property string query: ""
+    readonly property string normalizedQuery: query.trim().toLowerCase()
+    readonly property bool docked: visible && parent && parent.width >= 1320
+    readonly property var filteredResults: {
+        const rows = controller.results
+        if (!normalizedQuery.length) return rows
+        return rows.filter(function(row) { return String(row.title || "").toLowerCase().indexOf(panel.normalizedQuery) >= 0 })
+    }
     property Item returnFocus: null
     signal actionRequested(string kind)
+    signal writeRequested(string peer, string title)
     edge: Qt.RightEdge
-    width: Math.min(460, parent ? parent.width : 460)
+    width: Math.min(docked ? 400 : 460, parent ? parent.width : 460)
     height: parent ? parent.height : 700
     padding: 0
     modal: false
@@ -33,6 +47,8 @@ Drawer {
     enter: Transition { NumberAnimation { property: "position"; to: 1; duration: client.reduceMotion ? 0 : theme.panelDuration; easing.type: Easing.OutCubic } }
     exit: Transition { NumberAnimation { property: "position"; to: 0; duration: client.reduceMotion ? 0 : theme.motionDuration; easing.type: Easing.OutCubic } }
     function present(focusItem) {
+        person = false
+        personSeed = ({})
         loadedMemberCount = 0
         peer = client.selectedPeer
         peerTitle = client.title
@@ -40,6 +56,20 @@ Drawer {
         section = chat ? 0 : 1
         query = ""
         returnFocus = focusItem
+        loadSection()
+        open()
+    }
+    function presentPerson(value, focusItem) {
+        if (!value.peer || Number(value.peer) === 0 || Math.abs(Number(value.peer)) >= 2000000000) return
+        personSeed = value
+        person = true
+        loadedMemberCount = 0
+        peer = String(value.peer)
+        peerTitle = value.title || "Профиль"
+        avatar = value.avatar || ""
+        section = 1; query = ""
+        returnFocus = focusItem
+        client.loadPeerProfile(peer)
         loadSection()
         open()
     }
@@ -67,16 +97,7 @@ Drawer {
         radius: width / 2
         color: theme.secondary
         Text { anchors.centerIn: parent; text: portrait.name.substring(0, 1).toUpperCase(); color: theme.accent; font.pixelSize: portrait.width * 0.35 }
-        Image {
-            anchors.fill: parent
-            source: { client.media.revision; return client.media.source(portrait.source) }
-            sourceSize.width: 256; sourceSize.height: 256
-            fillMode: Image.PreserveAspectCrop
-            asynchronous: true
-            layer.enabled: true
-            layer.effect: MultiEffect { maskEnabled: true; maskSource: avatarMask }
-        }
-        Rectangle { id: avatarMask; anchors.fill: parent; radius: width / 2; layer.enabled: true; visible: false; color: "white" }
+        CachedAvatar { anchors.fill: parent; remoteSource: portrait.source }
     }
     component Divider: Rectangle {
         Layout.fillWidth: true
@@ -110,11 +131,20 @@ Drawer {
         background: Rectangle { color: infoRow.hovered ? theme.secondary : "transparent"; radius: 8; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
     }
 
+    AppMenu {
+        id: personMenu
+        AppMenuItem { kind: "chat"; text: "Написать сообщение"; onTriggered: panel.writeRequested(panel.peer, panel.displayTitle) }
+        AppMenuItem { kind: "search"; text: "Поиск в переписке"; onTriggered: panel.actionRequested("search") }
+        AppMenuItem { kind: "link"; text: "Копировать ссылку на профиль"; onTriggered: controller.copyText("https://vk.ru/" + (Number(panel.peer) < 0 ? "club" + Math.abs(Number(panel.peer)) : "id" + panel.peer)) }
+        AppMenuItem { kind: "person"; text: "Открыть во ВКонтакте"; onTriggered: Qt.openUrlExternally("https://vk.ru/" + (Number(panel.peer) < 0 ? "club" + Math.abs(Number(panel.peer)) : "id" + panel.peer)) }
+    }
+
     contentItem: ColumnLayout {
         spacing: 0
         RowLayout {
             Layout.fillWidth: true
             Layout.margins: 12
+            ToolButton { visible: panel.person && client.isChat; text: "‹"; font.pixelSize: 28; Accessible.name: "Вернуться к беседе"; onClicked: panel.present(panel.returnFocus) }
             ToolButton { text: "×"; font.pixelSize: 28; Accessible.name: "Закрыть информацию"; onClicked: panel.close() }
             Item { Layout.fillWidth: true }
             ToolButton { visible: panel.chat; text: "⚙"; font.pixelSize: 24; Accessible.name: "Настройки беседы"; onClicked: panel.actionRequested("settings") }
@@ -124,9 +154,10 @@ Drawer {
             objectName: "profileResults"
             Layout.fillWidth: true; Layout.fillHeight: true
             clip: true
-            model: panel.section === 1 ? photoRows : controller.results
+            model: panel.section === 1 ? photoRows : panel.filteredResults
             readonly property var photoRows: {
-                const rows = controller.results.filter(function(row) { return String(row.title || "").toLowerCase().indexOf(panel.query) >= 0 })
+                if (panel.section !== 1) return []
+                const rows = panel.filteredResults
                 const groups = []
                 for (let i = 0; i < rows.length; i += 3) groups.push(rows.slice(i, i + 3))
                 return groups
@@ -136,10 +167,10 @@ Drawer {
             header: ColumnLayout {
                 width: results.width
                 spacing: 12
-                ProfileAvatar { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 96; Layout.preferredHeight: 96; source: panel.avatar; name: panel.peerTitle }
+                ProfileAvatar { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 96; Layout.preferredHeight: 96; source: panel.info.avatar || panel.avatar; name: panel.displayTitle }
                 Label {
                     Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24
-                    text: panel.peerTitle; textFormat: Text.PlainText; color: theme.ink
+                    text: panel.displayTitle; textFormat: Text.PlainText; color: theme.ink
                     font.pixelSize: 23; font.bold: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
                 }
                 Label {
@@ -151,6 +182,7 @@ Drawer {
                 RowLayout {
                     Layout.fillWidth: true; Layout.margins: 20
                     spacing: 6
+                    Tile { objectName: "personWriteButton"; visible: panel.person; iconKind: "chat"; text: "Написать"; onClicked: panel.writeRequested(panel.peer, panel.displayTitle) }
                     Tile { iconKind: "search"; text: "Поиск"; Accessible.name: "Поиск в переписке"; onClicked: panel.actionRequested("search") }
                     Tile {
                         iconKind: panel.info.muted ? "muted" : "notifications"
@@ -158,7 +190,7 @@ Drawer {
                         Accessible.name: "Уведомления: " + text
                         onClicked: client.actions.conversationAction(panel.peer, panel.info.muted ? "unmute" : "mute")
                     }
-                    Tile { iconKind: "more"; text: "Ещё"; onClicked: panel.actionRequested("settings") }
+                    Tile { iconKind: "more"; text: "Ещё"; onClicked: panel.person ? personMenu.popup() : panel.actionRequested("settings") }
                 }
                 Divider {}
                 ColumnLayout {
@@ -203,35 +235,61 @@ Drawer {
                     }
                 }
                 TextField {
+                    id: profileSearch
                     objectName: "profileSearch"
                     Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16
                     placeholderText: panel.section === 0 ? "Поиск участников" : "Поиск в загруженном"
-                    text: panel.query; onTextEdited: panel.query = text.toLowerCase()
+                    text: panel.query; onTextEdited: panel.query = text
+                    Accessible.name: placeholderText
                     color: theme.ink; placeholderTextColor: theme.muted
-                    leftPadding: 14; implicitHeight: 40
+                    leftPadding: 14; rightPadding: text.length ? 40 : 14; implicitHeight: 40
+                    Keys.onEscapePressed: function(event) {
+                        event.accepted = !inputMethodComposing && text.length > 0
+                        if (event.accepted) { panel.query = ""; clear() }
+                    }
+                    ToolButton {
+                        objectName: "clearProfileSearch"
+                        anchors.right: parent.right; anchors.rightMargin: 4; anchors.verticalCenter: parent.verticalCenter
+                        width: 32; height: 32; visible: profileSearch.text.length > 0
+                        focusPolicy: Qt.NoFocus
+                        Accessible.name: "Очистить поиск"
+                        contentItem: ActionIcon { kind: "close"; stroke: theme.muted }
+                        background: Rectangle { radius: 8; color: parent.hovered ? theme.divider : "transparent" }
+                        onClicked: { panel.query = ""; profileSearch.clear(); profileSearch.forceActiveFocus() }
+                    }
                     background: Rectangle { color: theme.secondary; radius: 10; border.color: parent.activeFocus ? theme.accent : "transparent" }
                 }
                 InfoRow { Layout.leftMargin: 16; Layout.rightMargin: 16; visible: panel.chat && panel.section === 0; symbol: "+"; text: "Добавить участников"; onClicked: panel.actionRequested("add") }
                 Label { Layout.fillWidth: true; Layout.margins: 16; visible: controller.error.length > 0; text: controller.error; textFormat: Text.PlainText; color: "#ff6b6b"; wrapMode: Text.Wrap }
                 BusyIndicator { Layout.alignment: Qt.AlignHCenter; visible: controller.busy; running: visible }
-                Label { Layout.alignment: Qt.AlignHCenter; Layout.bottomMargin: 20; visible: !controller.busy && !controller.results.length && !controller.error.length; text: panel.section === 0 ? "Нет участников" : "Пока ничего нет"; color: theme.muted }
+                Label {
+                    objectName: "profileEmptyState"
+                    Layout.fillWidth: true; Layout.margins: 20
+                    visible: !controller.busy && !panel.filteredResults.length && !controller.error.length
+                    text: panel.normalizedQuery.length ? "Ничего не найдено в загруженном списке" : panel.section === 0 ? "Нет участников" : "Пока ничего нет"
+                    color: theme.muted; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
+                }
             }
             delegate: ColumnLayout {
                 id: result
+                objectName: "profileResultRow"
                 required property var modelData
-                readonly property bool matches: panel.section === 1 || String(modelData.title || "").toLowerCase().indexOf(panel.query) >= 0
+                readonly property bool nearViewport: panel.visible && y + height > results.contentY - results.height && y < results.contentY + 2 * results.height
                 width: results.width
-                visible: matches
-                height: matches ? implicitHeight : 0
                 RowLayout {
                     visible: panel.section === 0
                     Layout.fillWidth: true; Layout.minimumHeight: 64; Layout.leftMargin: 16; Layout.rightMargin: 16
                     spacing: 14
-                    ProfileAvatar { source: result.modelData.avatar || ""; name: result.modelData.title || "" }
+                    ProfileAvatar {
+                        source: result.modelData.avatar || ""; name: result.modelData.title || ""
+                        TapHandler { onTapped: panel.presentPerson(result.modelData, panel.returnFocus) }
+                    }
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 4
-                        Label { Layout.fillWidth: true; text: result.modelData.title || "Участник"; textFormat: Text.PlainText; color: theme.ink; font.pixelSize: 16; elide: Text.ElideRight }
+                        Label { Layout.fillWidth: true; text: result.modelData.title || "Участник"; textFormat: Text.PlainText; color: theme.ink; font.pixelSize: 16; elide: Text.ElideRight
+                            TapHandler { onTapped: panel.presentPerson(result.modelData, panel.returnFocus) }
+                        }
                         Label {
                             Layout.fillWidth: true
                             text: result.modelData.is_owner ? "Создатель беседы" : result.modelData.is_admin ? "Администратор" : panel.activity(result.modelData)
@@ -241,7 +299,7 @@ Drawer {
                     ToolButton { text:"···"; Accessible.name: "Действия с участником"; onClicked: memberMenu.popup() }
                     AppMenu {
                         id: memberMenu
-                        AppMenuItem { kind: "person"; text: "Открыть профиль"; onTriggered: Qt.openUrlExternally("https://vk.ru/" + (Number(result.modelData.peer) < 0 ? "club" + Math.abs(Number(result.modelData.peer)) : "id" + result.modelData.peer)) }
+                        AppMenuItem { kind: "person"; text: "Открыть профиль"; onTriggered: panel.presentPerson(result.modelData, panel.returnFocus) }
                         AppMenuItem { kind: "people"; text: "Управление участниками…"; visible: panel.manage && !result.modelData.is_owner; onTriggered: panel.actionRequested("members") }
                     }
                 }
@@ -259,12 +317,10 @@ Drawer {
                             Layout.preferredHeight: Layout.preferredWidth
                             padding: 0
                             Accessible.name: "Открыть фотографию"
-                            contentItem: Image {
-                                source: {
-                                    client.media.revision
-                                    const sizes = (thumbnail.attachment.photo || {}).sizes || []
-                                    return sizes.length ? client.media.source(sizes[sizes.length - 1].url) : ""
-                                }
+                            contentItem: CachedImage {
+                                objectName: "profilePhotoThumbnail"
+                                remoteSource: PhotoLayout.thumbnail(thumbnail.attachment, 360, 360)
+                                active: result.nearViewport
                                 sourceSize.width: 360; sourceSize.height: 360
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
@@ -275,7 +331,7 @@ Drawer {
                     }
                     Item { Layout.fillWidth: true; visible: panel.section === 1 && result.modelData.length < 3 }
                 }
-                AttachmentView { Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16; visible: panel.section !== 0 && panel.section !== 1; attachments: result.modelData.attachments || []; animationsEnabled: panel.opened && !client.reduceMotion }
+                AttachmentView { Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16; visible: panel.section !== 0 && panel.section !== 1; attachments: result.modelData.attachments || []; loadImages: result.nearViewport; animationsEnabled: result.nearViewport && panel.opened && !client.reduceMotion }
                 Button { Layout.leftMargin: 16; visible: panel.section !== 0 && panel.section !== 1 && !!result.modelData.cmid; text: "К сообщению"; onClicked: { client.openMessage(panel.peer, String(result.modelData.cmid)); panel.close() } }
             }
             footer: Button {

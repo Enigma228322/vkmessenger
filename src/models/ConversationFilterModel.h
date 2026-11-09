@@ -4,6 +4,23 @@
 
 class FolderController;
 
+// Recipient choices deliberately include archived chats and ignore sidebar filters.
+class ConversationPickerModel : public QSortFilterProxyModel {
+    Q_OBJECT
+    Q_PROPERTY(bool peopleOnly READ peopleOnly WRITE setPeopleOnly NOTIFY filterChanged)
+public:
+    explicit ConversationPickerModel(QAbstractItemModel *source, QObject *parent = nullptr);
+    bool peopleOnly() const { return m_peopleOnly; }
+    void setPeopleOnly(bool value);
+    Q_INVOKABLE QVariantMap get(int row) const;
+signals:
+    void filterChanged();
+protected:
+    bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
+private:
+    bool m_peopleOnly = false;
+};
+
 class ConversationFilterModel : public QSortFilterProxyModel {
     Q_OBJECT
     Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY filterChanged)

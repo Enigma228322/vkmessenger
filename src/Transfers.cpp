@@ -10,6 +10,35 @@
 #include <QUuid>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
+#include <QMimeDatabase>
+
+namespace {
+bool transientUploadFailure(QNetworkReply *reply)
+{
+    const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status >= 500 && status <= 504) return true;
+    switch (reply->error()) {
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::RemoteHostClosedError:
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::ProtocolFailure: return true;
+    default: return false;
+    }
+}
+QString transferError(QNetworkReply *reply)
+{
+    // Upload URLs contain signatures. Show the host and numeric status only.
+    const auto host = reply->url().host();
+    const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const auto location = host.isEmpty() ? QString() : " (" + host + ")";
+    if (reply->error() == QNetworkReply::HostNotFoundError) return "Сервер загрузки" + location + " не найден. Проверьте соединение или DNS и повторите.";
+    if (reply->error() == QNetworkReply::SslHandshakeFailedError) return "Не удалось установить защищённое соединение с сервером" + location + ". Повторите позже.";
+    if (status >= 400) return "Сервер передачи" + location + " вернул HTTP " + QString::number(status) + ". Повторите загрузку.";
+    return "Соединение с сервером" + location + " прервано (код " + QString::number(reply->error()) + "). Файл можно загрузить повторно.";
+}
+}
 
 Transfers::Transfers(Api api, QObject *parent, QNetworkAccessManager *network)
     : QObject(parent), m_api(std::move(api)), m_network(network ? network : &m_defaultNetwork) {}
@@ -21,6 +50,7 @@ void Transfers::upload(const QUrl &file, const QString &peer, const QString &kin
         m_error = "Выберите файл и диалог для загрузки."; emit changed(); return;
     }
     if (!QStringList{"photo", "doc", "video", "audio_message", "chat_photo"}.contains(kind)) return;
+    if (QFileInfo(file.toLocalFile()).size() == 0) { m_error = "Выбранный файл пуст. Выберите другой файл."; emit changed(); return; }
     if (kind == "chat_photo" && peer.toLongLong() <= 2000000000) {
         m_error = "Фотографию можно установить только для группового чата."; emit changed(); return;
     }
@@ -45,7 +75,8 @@ bool Transfers::adoptRecording(const QUrl &file, const QString &peer)
 void Transfers::next()
 {
     if (m_paused || m_queue.isEmpty()) { m_busy = false; emit changed(); return; }
-    m_job = m_queue.dequeue(); m_busy = true; m_error.clear(); m_progress = 0;
+    m_job = m_queue.dequeue(); m_busy = true; m_error.clear(); m_progress = 0; m_postRetries = 0;
+    m_status = "Подготовка файла…";
     m_filename = m_job.name.isEmpty() ? QFileInfo(m_job.file.toLocalFile()).fileName() : m_job.name;
     emit changed();
     if (!m_workspace.isEmpty() && !m_job.managed) { stage(); return; }
@@ -86,6 +117,7 @@ void Transfers::stage()
 
 void Transfers::requestServer()
 {
+    m_status = "Получаем адрес загрузки…"; emit changed();
     const auto generation = ++m_generation;
     QString method = "docs.getMessagesUploadServer";
     Form params{{"peer_id", m_job.peer}, {"type", m_job.kind == "audio_message" ? "audio_message" : "doc"}};
@@ -113,14 +145,21 @@ void Transfers::post(const QJsonObject &server, quint64 generation)
     QHttpPart part;
     QString field = m_job.kind == "photo" || m_job.kind == "chat_photo" ? "photo" : m_job.kind == "video" ? "video_file" : "file";
     auto name = m_filename; name.remove('"'); name.remove('\r'); name.remove('\n');
-    part.setHeader(QNetworkRequest::ContentDispositionHeader, QString("form-data; name=\"%1\"; filename=\"%2\"").arg(field, name));
+    name.replace('\\', '_');
+    part.setRawHeader("Content-Disposition", "form-data; name=\"" + field.toLatin1() + "\"; filename=\"" + name.toUtf8() + "\"");
+    part.setHeader(QNetworkRequest::ContentTypeHeader, QMimeDatabase().mimeTypeForFile(m_filename, QMimeDatabase::MatchExtension).name());
     part.setBodyDevice(file);
     multipart->append(part);
     QNetworkRequest request(url);
     request.setTransferTimeout(120000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // A single compatibility retry also avoids problematic HTTP/2 upload paths.
+    if (m_postRetries > 0) request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    m_status = "Загружаем файл…";
     auto reply = m_network->post(request, multipart);
     multipart->setParent(reply);
     m_reply = reply;
+    emit changed();
     connect(reply, &QNetworkReply::uploadProgress, this, [this, generation](qint64 sent, qint64 total) {
         if (generation != m_generation) return;
         m_progress = total > 0 ? double(sent) / total : 0; emit changed();
@@ -129,10 +168,20 @@ void Transfers::post(const QJsonObject &server, quint64 generation)
         reply->deleteLater();
         if (generation != m_generation) return;
         m_reply.clear();
-        if (reply->error() != QNetworkReply::NoError) { fail("Не удалось загрузить файл: " + reply->errorString()); return; }
+        const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (reply->error() != QNetworkReply::NoError || status >= 400) {
+            // No message has been sent yet. Refresh an expiring upload URL and
+            // replay the staged file once; video.save is not repeated implicitly.
+            if (m_job.kind != "video" && m_postRetries++ == 0 && transientUploadFailure(reply)) {
+                m_status = "Повторяем соединение…"; m_progress = 0; emit changed();
+                QTimer::singleShot(350, this, [this, generation] { if (generation == m_generation && m_busy) requestServer(); });
+            } else fail(transferError(reply));
+            return;
+        }
         QJsonParseError parse;
-        const auto object = QJsonDocument::fromJson(reply->readAll(), &parse).object();
-        if (parse.error != QJsonParseError::NoError || object.contains("error")) { fail("Сервер отклонил загруженный файл."); return; }
+        const auto document = QJsonDocument::fromJson(reply->readAll(), &parse);
+        const auto object = document.object();
+        if (parse.error != QJsonParseError::NoError || !document.isObject() || object.contains("error") || object.value("error_code").toInt() != 0) { fail("Сервер отклонил загруженный файл. Повторите загрузку; фотографию можно отправить как документ."); return; }
         save(object, generation);
     });
 }
@@ -140,7 +189,7 @@ void Transfers::post(const QJsonObject &server, quint64 generation)
 void Transfers::save(const QJsonObject &object, quint64 generation)
 {
     if (m_job.kind == "video") {
-        if (m_server.value("video_id").toInteger() <= 0 || object.contains("error_code")) { fail("VK не подтвердил загрузку видео."); return; }
+        if (m_server.value("video_id").toInteger() <= 0 || m_server.value("owner_id").toInteger() == 0 || object.value("error_code").toInt() != 0) { fail("VK не подтвердил загрузку видео."); return; }
         QString attachment = "video" + QString::number(m_server.value("owner_id").toInteger()) + "_" + QString::number(m_server.value("video_id").toInteger());
         if (!m_server.value("access_key").toString().isEmpty()) attachment += "_" + m_server.value("access_key").toString();
         finish(attachment); return;
@@ -148,6 +197,9 @@ void Transfers::save(const QJsonObject &object, quint64 generation)
     QString method;
     Form params;
     if (m_job.kind == "photo") {
+        if (object.value("server").toInteger() <= 0 || object.value("photo").toString().isEmpty() || object.value("photo").toString() == "[]" || object.value("hash").toString().isEmpty()) {
+            fail("VK не принял фотографию. Используйте JPEG или PNG либо отправьте её как документ."); return;
+        }
         method = "photos.saveMessagesPhoto";
         params = {{"server", QString::number(object.value("server").toInteger())},
             {"photo", object.value("photo").toString()}, {"hash", object.value("hash").toString()}};
@@ -161,6 +213,7 @@ void Transfers::save(const QJsonObject &object, quint64 generation)
         if (object.value("file").toString().isEmpty()) { fail("Сервер не вернул загруженный документ."); return; }
         params = {{"file", object.value("file").toString()}, {"title", m_filename}};
     }
+    m_status = "Сохраняем вложение…"; emit changed();
     m_api(method, params, [this, guard = QPointer<Transfers>(this), generation](const QJsonValue &value, const QString &error) {
         if (!guard || generation != m_generation) return;
         if (!error.isEmpty()) { fail(error); return; }
@@ -178,26 +231,33 @@ void Transfers::save(const QJsonObject &object, quint64 generation)
 
 void Transfers::finish(const QString &attachment)
 {
-    if (!attachment.isEmpty()) m_pending.append(QVariantMap{{"peer", m_job.peer}, {"attachment", attachment}, {"name", m_filename}, {"file", m_job.managed ? m_job.file.toString() : QString()}});
-    m_busy = false; m_progress = 1; emit changed();
+    if (!attachment.isEmpty()) {
+        m_pending.append(QVariantMap{{"peer", m_job.peer}, {"attachment", attachment}, {"name", m_filename}, {"file", m_job.managed ? m_job.file.toString() : QString()}});
+        emit pendingChanged();
+    }
+    m_busy = false; m_progress = 1; m_status.clear(); emit changed();
     QTimer::singleShot(0, this, [this] { if (!m_busy) next(); });
 }
 void Transfers::fail(const QString &error) {
-    m_error = error; m_busy = false; m_paused = true;
+    m_error = error; m_status.clear(); m_busy = false; m_paused = true;
     m_queue.prepend(m_job);
     emit changed();
 }
 void Transfers::cancel() {
-    ++m_generation; m_queue.clear(); m_busy = false; m_paused = false;
+    ++m_generation; m_queue.clear(); m_busy = false; m_paused = false; m_error.clear(); m_status.clear();
     if (m_stageCancelled) m_stageCancelled->store(true);
     if (m_reply) { m_reply->disconnect(this); m_reply->abort(); m_reply->deleteLater(); } m_reply.clear(); emit changed();
 }
-void Transfers::reset() { cancel(); cancelDownload(); m_pending.clear(); m_error.clear(); emit changed(); }
+void Transfers::reset() {
+    cancel(); cancelDownload();
+    if (!m_pending.isEmpty()) { m_pending.clear(); emit pendingChanged(); }
+    m_error.clear(); emit changed();
+}
 void Transfers::remove(int index) {
     if (index < 0 || index >= m_pending.size()) return;
     const auto file = QUrl(m_pending[index].toMap().value("file").toString()).toLocalFile();
     if (!m_workspace.isEmpty() && file.startsWith(m_workspace + '/')) QFile::remove(file);
-    m_pending.removeAt(index); emit changed();
+    m_pending.removeAt(index); emit pendingChanged(); emit changed();
 }
 QStringList Transfers::attachments(const QString &peer) const {
     QStringList result;
@@ -216,9 +276,11 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
 {
     cancelDownload();
     if (remote.scheme() != "https" || !destination.isLocalFile()) { m_error = "Некорректный адрес скачивания."; emit changed(); return; }
+    m_downloadRemote = remote; m_downloadDestination = destination;
     m_downloadFile = std::make_unique<QSaveFile>(destination.toLocalFile());
-    if (!m_downloadFile->open(QIODevice::WriteOnly)) { m_downloadFile.reset(); m_error = "Не удалось создать файл."; emit changed(); return; }
+    if (!m_downloadFile->open(QIODevice::WriteOnly)) { m_downloadFile.reset(); m_downloadFailed = true; m_error = "Не удалось создать файл."; emit changed(); return; }
     QNetworkRequest request(remote); request.setTransferTimeout(120000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     auto reply = m_network->get(request); m_downloadReply = reply;
     const auto generation = ++m_downloadGeneration;
     m_error.clear(); emit changed();
@@ -226,7 +288,7 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
         if (generation != m_downloadGeneration || !m_downloadFile) return;
         const auto data = reply->readAll();
         if (m_downloadFile->write(data) != data.size()) {
-            m_error = "Ошибка записи файла."; cancelDownload(); emit changed();
+            m_error = "Ошибка записи файла."; cancelDownload(); m_downloadFailed = true; emit changed();
         }
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply, generation, destination] {
@@ -236,13 +298,15 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
         const auto remaining = reply->readAll();
         const bool ok = reply->error() == QNetworkReply::NoError
             && m_downloadFile && m_downloadFile->write(remaining) == remaining.size() && m_downloadFile->commit();
-        if (!ok) m_error = "Не удалось скачать файл.";
+        m_downloadFailed = !ok;
+        if (!ok) m_error = reply->error() == QNetworkReply::NoError ? "Не удалось сохранить файл. Проверьте свободное место." : transferError(reply);
         m_downloadFile.reset(); emit changed();
         if (ok) emit downloadFinished(destination);
     });
 }
 void Transfers::cancelDownload() {
     ++m_downloadGeneration;
+    m_downloadFailed = false;
     if (m_downloadReply) { m_downloadReply->disconnect(this); m_downloadReply->abort(); m_downloadReply->deleteLater(); }
     m_downloadReply.clear();
     if (m_downloadFile) m_downloadFile->cancelWriting();
@@ -259,6 +323,10 @@ void Transfers::pause()
     if (m_reply) { m_reply->disconnect(this); m_reply->abort(); m_reply->deleteLater(); } m_reply.clear(); emit changed();
 }
 void Transfers::resume() { m_paused = false; m_error.clear(); if (!m_busy) next(); }
+void Transfers::retry() {
+    if (m_downloadFailed) download(m_downloadRemote, m_downloadDestination);
+    else resume();
+}
 QJsonObject Transfers::savedState() const
 {
     QJsonArray jobs;
@@ -271,6 +339,7 @@ void Transfers::restoreState(const QJsonObject &state)
 {
     reset(); m_paused = true;
     m_pending = state.value("pending").toArray().toVariantList();
+    if (!m_pending.isEmpty()) emit pendingChanged();
     for (const auto &item : state.value("jobs").toArray()) {
         const auto job = item.toObject();
         const QUrl file(job.value("file").toString());

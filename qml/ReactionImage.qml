@@ -5,14 +5,14 @@ Item {
     id: root
     property url remoteSource
     readonly property bool ready: picture.status === Image.Ready
-    readonly property bool failed: { messenger.media.revision; return picture.status === Image.Error || (remoteSource.toString().length > 0 && messenger.media.error(remoteSource).length > 0) }
+    readonly property bool failed: { return picture.status === Image.Error || picture.loadError.length > 0 }
     implicitWidth: 24
     implicitHeight: 24
-    Image {
+    CachedImage {
         id: picture
         objectName: "reactionImage"
         anchors.fill: parent
-        source: { messenger.media.revision; return messenger.media.source(root.remoteSource) }
+        remoteSource: root.remoteSource
         fillMode: Image.PreserveAspectFit
         asynchronous: true
         sourceSize.width: 80

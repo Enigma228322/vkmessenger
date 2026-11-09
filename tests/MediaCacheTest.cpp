@@ -56,6 +56,22 @@ private slots:
         cache.setAccount("user:1"); QCOMPARE(cache.source(url), first); QCOMPARE(network.requests, 2);
         QVERIFY(cache.source(QUrl("file:///etc/passwd")).isEmpty());
     }
+    void assetNotificationsAreScopedAndResetOnAccountChanges()
+    {
+        QTemporaryDir directory; AssetNetwork network;
+        MediaCache cache(directory.path(), nullptr, &network);
+        QSignalSpy updates(&cache, &MediaCache::sourceUpdated), resets(&cache, &MediaCache::sourcesReset);
+        cache.setAccount("user:1"); QCOMPARE(resets.count(), 1);
+        const QUrl first("https://assets.test/first"), second("https://assets.test/second");
+        cache.source(first); cache.source(second);
+        QTRY_COMPARE(updates.count(), 2);
+        QSet<QUrl> received; for (const auto &update : updates) received.insert(update.first().toUrl());
+        QCOMPARE(received, QSet<QUrl>({first, second}));
+        cache.setAccount("user:2"); QCOMPARE(resets.count(), 2);
+        QVERIFY(cache.cached(first).isEmpty());
+        cache.clear(); QCOMPARE(resets.count(), 3);
+    }
+
     void retryReplacesAnUndecodableCachedImage()
     {
         QTemporaryDir directory; AssetNetwork network;

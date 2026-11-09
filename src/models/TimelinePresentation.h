@@ -5,6 +5,36 @@
 // Presentation only: never persist derived grouping or change message identity.
 // Rules follow core/model/Convo.ts::flowHistory in the local web source.
 namespace TimelinePresentation {
+// Published history is ordered by server CMID, followed by the local outbox.
+// Walk only the changed tail; never pass the whole history through QML to count it.
+inline qint64 serverCmid(const QVariantMap &row)
+{
+    if (row.value("gap").toBool() || row.value("local").toBool()) return 0;
+    return qMax(qint64(0), row.value("cmid", row.value("id")).toLongLong());
+}
+
+inline QString latestCmid(const QVariantList &rows)
+{
+    for (auto it = rows.crbegin(); it != rows.crend(); ++it)
+        if (const auto cmid = serverCmid(it->toMap()); cmid > 0) return QString::number(cmid);
+    return {};
+}
+
+inline int incomingAfter(const QVariantList &rows, const QString &after)
+{
+    const auto boundary = after.toLongLong();
+    if (boundary <= 0) return 0;
+    int count = 0;
+    for (auto it = rows.crbegin(); it != rows.crend(); ++it) {
+        const auto row = it->toMap();
+        const auto cmid = serverCmid(row);
+        if (!cmid) continue;
+        if (cmid <= boundary) break;
+        if (!row.value("outgoing").toBool()) ++count;
+    }
+    return count;
+}
+
 inline QVariantList decorate(QVariantList rows, qint64 inRead = 0)
 {
     QVariantMap previous;

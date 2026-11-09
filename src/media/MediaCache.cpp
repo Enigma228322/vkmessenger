@@ -31,7 +31,7 @@ void MediaCache::setAccount(const QString &account)
     const auto directory = account.isEmpty() ? QString() : m_root + '/' + QCryptographicHash::hash(account.toUtf8(), QCryptographicHash::Sha256).toHex();
     if (directory == m_accountDirectory) return;
     stop(); m_accountDirectory = directory; m_errors.clear(); m_accessed.clear();
-    ++m_revision; emit changed();
+    ++m_revision; emit sourcesReset(); emit changed();
 }
 QString MediaCache::path(const QUrl &remote) const
 {
@@ -75,10 +75,10 @@ void MediaCache::pump()
         const auto remote = m_queue.dequeue();
         const auto generation = m_generation;
         const auto filePath = path(remote);
-        if (!QDir().mkpath(m_accountDirectory)) { m_waiting.remove(remote); m_errors[remote] = "Не удалось создать медиакэш."; ++m_revision; emit changed(); continue; }
+        if (!QDir().mkpath(m_accountDirectory)) { m_waiting.remove(remote); m_errors[remote] = "Не удалось создать медиакэш."; ++m_revision; emit sourceUpdated(remote); emit changed(); continue; }
         QFile::setPermissions(m_accountDirectory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
         auto file = std::make_shared<QSaveFile>(filePath);
-        if (!file->open(QIODevice::WriteOnly)) { m_waiting.remove(remote); m_errors[remote] = "Не удалось сохранить вложение."; ++m_revision; emit changed(); continue; }
+        if (!file->open(QIODevice::WriteOnly)) { m_waiting.remove(remote); m_errors[remote] = "Не удалось сохранить вложение."; ++m_revision; emit sourceUpdated(remote); emit changed(); continue; }
         QNetworkRequest request(remote); request.setTransferTimeout(30000);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         auto reply = m_network->get(request); m_active[remote] = reply;
@@ -104,7 +104,7 @@ void MediaCache::pump()
                 m_entries[filePath] = {filePath, size, QDateTime::currentMSecsSinceEpoch()}; m_bytes += size;
                 trim();
             } else { file->cancelWriting(); m_errors[remote] = "Не удалось загрузить вложение. Нажмите, чтобы повторить."; }
-            ++m_revision; emit changed(); pump();
+            ++m_revision; emit sourceUpdated(remote); emit changed(); pump();
         });
     }
     emit changed();
@@ -115,7 +115,7 @@ void MediaCache::retry(const QUrl &remote)
     if (!file.isEmpty() && QFile::remove(file)) {
         m_bytes -= m_entries.take(file).size; m_accessed.remove(file);
     }
-    m_errors.remove(remote); ++m_revision; emit changed(); source(remote);
+    m_errors.remove(remote); ++m_revision; emit sourceUpdated(remote); emit changed(); source(remote);
 }
 void MediaCache::setLimit(qint64 bytes)
 {
@@ -157,5 +157,5 @@ void MediaCache::clear()
             else ++it;
         }
     }
-    m_errors.clear(); m_accessed.clear(); ++m_revision; emit changed();
+    m_errors.clear(); m_accessed.clear(); ++m_revision; emit sourcesReset(); emit changed();
 }
