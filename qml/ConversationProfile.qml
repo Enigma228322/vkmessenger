@@ -25,6 +25,7 @@ Drawer {
     property string avatar: ""
     property int section: 0
     property string query: ""
+    property Item searchInput: null
     readonly property string normalizedQuery: query.trim().toLowerCase()
     readonly property bool docked: visible && parent && parent.width >= 1320
     readonly property var filteredResults: {
@@ -74,6 +75,10 @@ Drawer {
         open()
     }
     function loadSection() {
+        profileSearchDelay.stop()
+        query = ""
+        if (searchInput) searchInput.clear()
+        results.currentIndex = -1
         controller.reset()
         if (section === 0 && chat) controller.loadMembers(peer)
         else controller.loadAttachments(peer, ["", "photo", "video", "doc", "link"][section])
@@ -83,21 +88,35 @@ Drawer {
         const time = person.last_seen ? person.last_seen.time : 0
         return time ? "Был(а) " + Qt.formatDateTime(new Date(time * 1000), "dd.MM.yyyy в HH:mm") : ""
     }
+    function focusMembers(direction) {
+        if (section !== 0 || !searchInput || searchInput.inputMethodComposing) return
+        searchInput.applySearch()
+        if (!results.count) return
+        results.currentIndex = direction > 0 ? 0 : results.count - 1
+        memberNavigation.forceActiveFocus()
+        results.positionViewAtIndex(results.currentIndex, ListView.Contain)
+    }
+    function openCurrentMember() {
+        if (section !== 0 || results.currentIndex < 0 || results.currentIndex >= filteredResults.length) return
+        presentPerson(filteredResults[results.currentIndex], returnFocus)
+    }
     Connections {
         target: controller
         function onChanged() { if (panel.chat && controller.memberCount > 0) panel.loadedMemberCount = controller.memberCount }
     }
-    onClosed: { controller.reset(); if (returnFocus) returnFocus.forceActiveFocus() }
+    onClosed: { profileSearchDelay.stop(); query = ""; if (searchInput) searchInput.clear(); controller.reset(); if (returnFocus) returnFocus.forceActiveFocus() }
+    onQueryChanged: results.currentIndex = -1
 
     component ProfileAvatar: Rectangle {
         id: portrait
         property string source: ""
         property string name: ""
+        property bool active: true
         implicitWidth: 48; implicitHeight: 48
         radius: width / 2
         color: theme.secondary
         Text { anchors.centerIn: parent; text: portrait.name.substring(0, 1).toUpperCase(); color: theme.accent; font.pixelSize: portrait.width * 0.35 }
-        CachedAvatar { anchors.fill: parent; remoteSource: portrait.source }
+        CachedAvatar { anchors.fill: parent; remoteSource: portrait.source; active: portrait.active }
     }
     component Divider: Rectangle {
         Layout.fillWidth: true
@@ -149,6 +168,32 @@ Drawer {
             Item { Layout.fillWidth: true }
             ToolButton { visible: panel.chat; text: "⚙"; font.pixelSize: 24; Accessible.name: "Настройки беседы"; onClicked: panel.actionRequested("settings") }
         }
+        // The header search field and delegates belong to ListView's focus scope.
+        // Keep navigation outside it so changing the current row retains focus.
+        Item {
+            id: memberNavigation
+            objectName: "profileMemberNavigation"
+            Layout.preferredWidth: 0; Layout.preferredHeight: 0
+            visible: panel.section === 0
+            activeFocusOnTab: true
+            Accessible.role: Accessible.List
+            Accessible.name: results.currentIndex >= 0 && results.currentIndex < panel.filteredResults.length ? panel.filteredResults[results.currentIndex].title || "Участник" : "Участники беседы"
+            onActiveFocusChanged: if (activeFocus && panel.section === 0 && results.currentIndex < 0 && results.count) results.currentIndex = 0
+            Keys.onReturnPressed: panel.openCurrentMember()
+            Keys.onEnterPressed: panel.openCurrentMember()
+            Keys.onSpacePressed: panel.openCurrentMember()
+            Keys.onEscapePressed: if (panel.searchInput) panel.searchInput.forceActiveFocus()
+            Keys.onPressed: function(event) {
+                if (panel.section !== 0 || !results.count) return
+                if (event.key === Qt.Key_Home) { results.currentIndex = 0; results.positionViewAtBeginning(); event.accepted = true }
+                else if (event.key === Qt.Key_End) { results.currentIndex = results.count - 1; results.positionViewAtEnd(); event.accepted = true }
+                else if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
+                    results.currentIndex = Math.max(0, Math.min(results.count - 1, results.currentIndex + (event.key === Qt.Key_Down ? 1 : -1)))
+                    results.positionViewAtIndex(results.currentIndex, ListView.Contain)
+                    event.accepted = true
+                }
+            }
+        }
         ListView {
             id: results
             objectName: "profileResults"
@@ -163,11 +208,13 @@ Drawer {
                 return groups
             }
             spacing: 4
+            keyNavigationEnabled: false
+            currentIndex: -1
             ScrollBar.vertical: ScrollBar {}
             header: ColumnLayout {
                 width: results.width
                 spacing: 12
-                ProfileAvatar { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 96; Layout.preferredHeight: 96; source: panel.info.avatar || panel.avatar; name: panel.displayTitle }
+                ProfileAvatar { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 96; Layout.preferredHeight: 96; source: panel.info.avatar || panel.avatar; name: panel.displayTitle; active: panel.visible }
                 Label {
                     Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24
                     text: panel.displayTitle; textFormat: Text.PlainText; color: theme.ink
@@ -237,15 +284,29 @@ Drawer {
                 TextField {
                     id: profileSearch
                     objectName: "profileSearch"
+                    Component.onCompleted: panel.searchInput = profileSearch
                     Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16
                     placeholderText: panel.section === 0 ? "Поиск участников" : "Поиск в загруженном"
-                    text: panel.query; onTextEdited: panel.query = text
+                    text: panel.query
+                    function applySearch() { profileSearchDelay.stop(); if (!inputMethodComposing) panel.query = text }
+                    onTextEdited: {
+                        profileSearchDelay.stop()
+                        if (!text.length) applySearch()
+                        else if (!inputMethodComposing) profileSearchDelay.restart()
+                    }
+                    onInputMethodComposingChanged: {
+                        profileSearchDelay.stop()
+                        if (panel.visible && !inputMethodComposing) profileSearchDelay.restart()
+                    }
+                    onAccepted: { applySearch(); panel.focusMembers(1) }
+                    Keys.onDownPressed: function(event) { event.accepted = panel.section === 0 && !inputMethodComposing; if (event.accepted) panel.focusMembers(1) }
+                    Keys.onUpPressed: function(event) { event.accepted = panel.section === 0 && !inputMethodComposing; if (event.accepted) panel.focusMembers(-1) }
                     Accessible.name: placeholderText
                     color: theme.ink; placeholderTextColor: theme.muted
                     leftPadding: 14; rightPadding: text.length ? 40 : 14; implicitHeight: 40
                     Keys.onEscapePressed: function(event) {
                         event.accepted = !inputMethodComposing && text.length > 0
-                        if (event.accepted) { panel.query = ""; clear() }
+                        if (event.accepted) { profileSearchDelay.stop(); panel.query = ""; clear() }
                     }
                     ToolButton {
                         objectName: "clearProfileSearch"
@@ -255,7 +316,7 @@ Drawer {
                         Accessible.name: "Очистить поиск"
                         contentItem: ActionIcon { kind: "close"; stroke: theme.muted }
                         background: Rectangle { radius: 8; color: parent.hovered ? theme.divider : "transparent" }
-                        onClicked: { panel.query = ""; profileSearch.clear(); profileSearch.forceActiveFocus() }
+                        onClicked: { profileSearchDelay.stop(); panel.query = ""; profileSearch.clear(); profileSearch.forceActiveFocus() }
                     }
                     background: Rectangle { color: theme.secondary; radius: 10; border.color: parent.activeFocus ? theme.accent : "transparent" }
                 }
@@ -265,74 +326,105 @@ Drawer {
                 Label {
                     objectName: "profileEmptyState"
                     Layout.fillWidth: true; Layout.margins: 20
-                    visible: !controller.busy && !panel.filteredResults.length && !controller.error.length
+                    visible: !controller.busy && !profileSearchDelay.running && !profileSearch.inputMethodComposing && !panel.filteredResults.length && !controller.error.length
                     text: panel.normalizedQuery.length ? "Ничего не найдено в загруженном списке" : panel.section === 0 ? "Нет участников" : "Пока ничего нет"
                     color: theme.muted; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                 }
             }
-            delegate: ColumnLayout {
+            delegate: Loader {
                 id: result
                 objectName: "profileResultRow"
                 required property var modelData
                 readonly property bool nearViewport: panel.visible && y + height > results.contentY - results.height && y < results.contentY + 2 * results.height
+                readonly property bool current: ListView.isCurrentItem && memberNavigation.activeFocus
                 width: results.width
-                RowLayout {
-                    visible: panel.section === 0
-                    Layout.fillWidth: true; Layout.minimumHeight: 64; Layout.leftMargin: 16; Layout.rightMargin: 16
-                    spacing: 14
-                    ProfileAvatar {
-                        source: result.modelData.avatar || ""; name: result.modelData.title || ""
-                        TapHandler { onTapped: panel.presentPerson(result.modelData, panel.returnFocus) }
-                    }
+                height: item ? item.implicitHeight : 0
+                sourceComponent: panel.section === 0 ? memberComponent : panel.section === 1 ? photosComponent : attachmentComponent
+                Component {
+                    id: memberComponent
                     ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-                        Label { Layout.fillWidth: true; text: result.modelData.title || "Участник"; textFormat: Text.PlainText; color: theme.ink; font.pixelSize: 16; elide: Text.ElideRight
-                            TapHandler { onTapped: panel.presentPerson(result.modelData, panel.returnFocus) }
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            text: result.modelData.is_owner ? "Создатель беседы" : result.modelData.is_admin ? "Администратор" : panel.activity(result.modelData)
-                            visible: text.length > 0; color: result.modelData.online ? theme.accent : theme.muted; font.pixelSize: 13; elide: Text.ElideRight
-                        }
-                    }
-                    ToolButton { text:"···"; Accessible.name: "Действия с участником"; onClicked: memberMenu.popup() }
-                    AppMenu {
-                        id: memberMenu
-                        AppMenuItem { kind: "person"; text: "Открыть профиль"; onTriggered: panel.presentPerson(result.modelData, panel.returnFocus) }
-                        AppMenuItem { kind: "people"; text: "Управление участниками…"; visible: panel.manage && !result.modelData.is_owner; onTriggered: panel.actionRequested("members") }
-                    }
-                }
-                RowLayout {
-                    visible: panel.section === 1
-                    Layout.fillWidth: true
-                    spacing: 3
-                    Repeater {
-                        model: panel.section === 1 ? result.modelData : []
-                        delegate: ItemDelegate {
-                            id: thumbnail
-                            required property var modelData
-                            readonly property var attachment: (modelData.attachments || [])[0] || {}
-                            Layout.preferredWidth: (results.width - 6) / 3
-                            Layout.preferredHeight: Layout.preferredWidth
-                            padding: 0
-                            Accessible.name: "Открыть фотографию"
-                            contentItem: CachedImage {
-                                objectName: "profilePhotoThumbnail"
-                                remoteSource: PhotoLayout.thumbnail(thumbnail.attachment, 360, 360)
-                                active: result.nearViewport
-                                sourceSize.width: 360; sourceSize.height: 360
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
+                        ItemDelegate {
+                            id: member
+                            objectName: "profileMemberButton"
+                            Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
+                            implicitHeight: 72; padding: 12
+                            focusPolicy: Qt.NoFocus
+                            Accessible.name: result.modelData.title || "Участник"
+                            Accessible.role: Accessible.Button
+                            Accessible.onPressAction: clicked()
+                            onClicked: panel.presentPerson(result.modelData, panel.returnFocus)
+                            background: Rectangle {
+                                radius: 12
+                                color: member.down ? theme.pressed : member.hovered || result.current ? theme.secondary : "transparent"
+                                border.color: result.current ? theme.accent : "transparent"
                             }
-                            background: Rectangle { color: theme.secondary }
-                            onClicked: client.actions.openAttachment(attachment, controller.results.map(function(row) { return (row.attachments || [])[0] }).filter(function(item) { return !!item }))
+                            contentItem: RowLayout {
+                                spacing: 14
+                                ProfileAvatar { objectName: "profileMemberAvatar"; source: result.modelData.avatar || ""; name: result.modelData.title || ""; active: result.nearViewport }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 4
+                                    Label { Layout.fillWidth: true; text: result.modelData.title || "Участник"; textFormat: Text.PlainText; color: theme.ink; font.pixelSize: 16; elide: Text.ElideRight }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: result.modelData.is_owner ? "Создатель беседы" : result.modelData.is_admin ? "Администратор" : panel.activity(result.modelData)
+                                        visible: text.length > 0; color: result.modelData.online ? theme.accent : theme.muted; font.pixelSize: 13; elide: Text.ElideRight
+                                    }
+                                }
+                                ToolButton {
+                                    objectName: "profileMemberMenuButton"
+                                    Accessible.name: "Действия с участником"
+                                    implicitWidth: 32; implicitHeight: 32
+                                    contentItem: ActionIcon { kind: "more"; stroke: theme.muted }
+                                    background: Rectangle { radius: 8; color: parent.hovered ? theme.divider : "transparent"; border.color: parent.visualFocus ? theme.accent : "transparent" }
+                                    onClicked: memberMenu.popup()
+                                }
+                            }
+                            AppMenu {
+                                id: memberMenu
+                                AppMenuItem { kind: "person"; text: "Открыть профиль"; onTriggered: panel.presentPerson(result.modelData, panel.returnFocus) }
+                                AppMenuItem { kind: "people"; text: "Управление участниками…"; visible: panel.manage && !result.modelData.is_owner; onTriggered: panel.actionRequested("members") }
+                            }
                         }
                     }
-                    Item { Layout.fillWidth: true; visible: panel.section === 1 && result.modelData.length < 3 }
                 }
-                AttachmentView { Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16; visible: panel.section !== 0 && panel.section !== 1; attachments: result.modelData.attachments || []; loadImages: result.nearViewport; animationsEnabled: result.nearViewport && panel.opened && !client.reduceMotion }
-                Button { Layout.leftMargin: 16; visible: panel.section !== 0 && panel.section !== 1 && !!result.modelData.cmid; text: "К сообщению"; onClicked: { client.openMessage(panel.peer, String(result.modelData.cmid)); panel.close() } }
+                Component {
+                    id: photosComponent
+                    RowLayout {
+                        spacing: 3
+                        Repeater {
+                            model: result.modelData
+                            delegate: ItemDelegate {
+                                id: thumbnail
+                                objectName: "profilePhotoButton"
+                                required property var modelData
+                                readonly property var attachment: (modelData.attachments || [])[0] || {}
+                                Layout.preferredWidth: (results.width - 6) / 3
+                                Layout.preferredHeight: Layout.preferredWidth
+                                padding: 0
+                                Accessible.name: "Открыть фотографию"
+                                contentItem: CachedImage {
+                                    objectName: "profilePhotoThumbnail"
+                                    remoteSource: PhotoLayout.thumbnail(thumbnail.attachment, 360, 360)
+                                    active: result.nearViewport
+                                    sourceSize.width: 360; sourceSize.height: 360
+                                    fillMode: Image.PreserveAspectCrop
+                                    asynchronous: true
+                                }
+                                background: Rectangle { color: theme.secondary; border.color: thumbnail.visualFocus ? theme.accent : "transparent"; border.width: 2 }
+                                onClicked: client.actions.openAttachment(attachment, controller.results.map(function(row) { return (row.attachments || [])[0] }).filter(function(item) { return !!item }))
+                            }
+                        }
+                        Item { Layout.fillWidth: true; visible: result.modelData.length < 3 }
+                    }
+                }
+                Component {
+                    id: attachmentComponent
+                    ColumnLayout {
+                        objectName: "profileAttachmentContent"
+                        AttachmentView { Layout.fillWidth: true; Layout.leftMargin: 16; Layout.rightMargin: 16; attachments: result.modelData.attachments || []; loadImages: result.nearViewport; animationsEnabled: result.nearViewport && panel.opened && !client.reduceMotion }
+                        Button { Layout.leftMargin: 16; visible: !!result.modelData.cmid; text: "К сообщению"; onClicked: { client.openMessage(panel.peer, String(result.modelData.cmid)); panel.close() } }
+                    }
+                }
             }
             footer: Button {
                 width: results.width
@@ -343,4 +435,5 @@ Drawer {
             }
         }
     }
+    Timer { id: profileSearchDelay; interval: 150; onTriggered: if (panel.visible && panel.searchInput) panel.searchInput.applySearch() }
 }

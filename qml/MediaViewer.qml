@@ -141,6 +141,8 @@ Dialog {
     Shortcut { sequence: "Escape"; enabled: viewer.visible; onActivated: viewer.fullscreen ? viewer.toggleFullscreen() : viewer.close() }
     Shortcut { sequence: "Left"; enabled: viewer.opened; onActivated: viewer.isPhoto ? viewer.showPhoto(viewer.currentIndex - 1) : viewer.seekBy(-5000) }
     Shortcut { sequence: "Right"; enabled: viewer.opened; onActivated: viewer.isPhoto ? viewer.showPhoto(viewer.currentIndex + 1) : viewer.seekBy(5000) }
+    Shortcut { sequence: "Home"; enabled: viewer.opened && viewer.isPhoto && viewer.gallery.length > 1; onActivated: viewer.showPhoto(0) }
+    Shortcut { sequence: "End"; enabled: viewer.opened && viewer.isPhoto && viewer.gallery.length > 1; onActivated: viewer.showPhoto(viewer.gallery.length - 1) }
     Shortcut { sequence: "Space"; enabled: viewer.opened && !viewer.isPhoto; onActivated: viewer.togglePlayback() }
     Shortcut { sequence: "M"; enabled: viewer.opened && !viewer.isPhoto; onActivated: sound.muted = !sound.muted }
     Shortcut { sequence: "F"; enabled: viewer.opened; onActivated: viewer.toggleFullscreen() }
@@ -295,6 +297,67 @@ Dialog {
                 ActionIcon { anchors.horizontalCenter: parent.horizontalCenter; width: 40; height: 40; kind: "retry"; stroke: "#e8a699" }
                 Text { objectName: "viewerError"; width: parent.width; text: viewer.currentError; visible: text.length > 0; color: viewer.ink; font.pixelSize: 15; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText }
                 MediaButton { objectName: "viewerRetry"; anchors.horizontalCenter: parent.horizontalCenter; implicitWidth: 190; text: "Повторить загрузку"; primary: true; visible: viewer.currentError.length > 0 && viewer.remote.toString().length > 0; onClicked: viewer.retryCurrent() }
+            }
+        }
+        Item {
+            Layout.fillWidth: true; Layout.preferredHeight: visible ? 72 : 0
+            visible: viewer.isPhoto && viewer.gallery.length > 1
+            ListView {
+                id: filmstrip
+                objectName: "viewerThumbnails"
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 32, viewer.gallery.length * 80 - 8); height: 56
+                orientation: ListView.Horizontal
+                spacing: 8; clip: true
+                cacheBuffer: 0
+                reuseItems: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: viewer.visible && viewer.isPhoto && viewer.gallery.length > 1 ? viewer.gallery : []
+                currentIndex: viewer.currentIndex
+                function revealCurrent() {
+                    if (count && viewer.visible) positionViewAtIndex(viewer.currentIndex, ListView.Contain)
+                }
+                onCurrentIndexChanged: Qt.callLater(revealCurrent)
+                onCountChanged: Qt.callLater(revealCurrent)
+                onWidthChanged: Qt.callLater(revealCurrent)
+                delegate: Button {
+                    id: miniature
+                    objectName: "viewerThumbnail"
+                    required property var modelData
+                    required property int index
+                    property bool pooled: false
+                    ListView.onPooled: pooled = true
+                    ListView.onReused: pooled = false
+                    readonly property bool selected: index === viewer.currentIndex
+                    readonly property bool inViewport: x + width > filmstrip.contentX && x < filmstrip.contentX + filmstrip.width
+                    width: 72; height: 56; padding: 3
+                    focusPolicy: Qt.NoFocus
+                    Accessible.name: "Фотография " + (index + 1) + " из " + viewer.gallery.length + (modelData.title ? ": " + modelData.title : "")
+                    Accessible.role: Accessible.Button
+                    Accessible.checkable: true
+                    Accessible.checked: selected
+                    ToolTip.visible: hovered; ToolTip.text: modelData.title || "Фотография " + (index + 1); ToolTip.delay: 600
+                    background: Rectangle {
+                        radius: 8
+                        color: miniature.hovered ? "#2b3542" : "#1d2530"
+                        border.width: miniature.selected ? 2 : 1
+                        border.color: miniature.selected ? viewer.accent : "#343e4c"
+                    }
+                    contentItem: Item {
+                        clip: true
+                        ActionIcon { anchors.centerIn: parent; width: 20; height: 20; kind: "photo"; stroke: viewer.muted; visible: preview.status !== Image.Ready }
+                        CachedImage {
+                            id: preview
+                            objectName: "viewerThumbnailImage"
+                            anchors.fill: parent
+                            remoteSource: miniature.modelData.thumbnail || miniature.modelData.source || ""
+                            active: viewer.visible && viewer.isPhoto && miniature.inViewport && !miniature.pooled
+                            sourceSize.width: 160; sourceSize.height: 160
+                            fillMode: Image.PreserveAspectCrop
+                        }
+                    }
+                    onClicked: if (!selected) viewer.showPhoto(index)
+                }
             }
         }
         Item {

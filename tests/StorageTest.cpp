@@ -96,6 +96,23 @@ private slots:
         QTRY_VERIFY(done);
     }
 
+    void delayedContentInvalidationSurvivesRestartWithoutChangingOtherAccounts()
+    {
+        QTemporaryDir directory;
+        const QJsonArray messages{QJsonObject{{"conversation_message_id", 358}, {"text", "google.com"}}};
+        {
+            LocalStore store(directory.path());
+            store.saveHistory("user:1", "77", messages, {}, false, false);
+            store.saveHistory("user:2", "77", messages, {}, false, false);
+            store.invalidateMessages("user:1", "77", {358, 999});
+        }
+        LocalStore store(directory.path()); bool done = false;
+        store.loadHistory("user:1", "77", [&](const auto &value, const auto &error) {
+            QVERIFY(error.isEmpty()); QCOMPARE(value.value("messages").toArray().size(), 1); QCOMPARE(value.value("dirty").toArray(), QJsonArray{358}); done = true;
+        }); QTRY_VERIFY(done); done = false;
+        store.loadHistory("user:2", "77", [&](const auto &value, const auto &error) { QVERIFY(error.isEmpty()); QVERIFY(value.value("dirty").toArray().isEmpty()); done = true; }); QTRY_VERIFY(done);
+    }
+
     void deletionDirtyFlagsAndAccountIsolation()
     {
         QTemporaryDir directory;

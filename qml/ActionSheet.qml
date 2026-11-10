@@ -22,14 +22,15 @@ Dialog {
     property bool reducedMotion: false
     onClosed: {
         searchDelay.stop()
-        if (picker || mode === "search") controller.reset()
+        if (picker || nativeMessageResults) controller.reset()
     }
     readonly property bool picker: ["forward", "create", "add", "peers"].indexOf(mode) >= 0
     readonly property bool peoplePicker: mode === "create" || mode === "add"
     readonly property bool localChoices: picker && !query.text.trim().length
     readonly property bool messageResults: ["search", "important", "attachments"].indexOf(mode) >= 0
+    readonly property bool nativeMessageResults: mode === "search" || mode === "important"
     readonly property var remoteRows: {
-        if (!visible || localChoices || !(picker || messageResults || mode === "members" || mode === "reacted")) return []
+        if (!visible || nativeMessageResults || localChoices || !(picker || messageResults || mode === "members" || mode === "reacted")) return []
         return peoplePicker ? controller.results.filter(function(row) { return messenger.isPerson(String(row.peer)) }) : controller.results
     }
     readonly property var controller: messenger.actions
@@ -97,7 +98,7 @@ Dialog {
     }
     function activateCurrent() {
         if (results.currentIndex < 0 || results.currentIndex >= results.count) return
-        activateResult(localChoices ? messenger.conversationChoices.get(results.currentIndex) : remoteRows[results.currentIndex])
+        activateResult(localChoices ? messenger.conversationChoices.get(results.currentIndex) : nativeMessageResults ? controller.messageModel.get(results.currentIndex) : remoteRows[results.currentIndex])
     }
     function focusResults(direction) {
         if (query.inputMethodComposing || !results.count) return
@@ -143,7 +144,7 @@ Dialog {
         Accessible.onPressAction: sheet.activateResult(row)
         background: Rectangle {
             radius: 12
-            color: card.highlighted ? design.selected : card.hovered ? design.hover : "transparent"
+            color: card.highlighted ? design.selected : card.hovered ? design.hover : sheet.nativeMessageResults ? design.secondary : "transparent"
             border.color: card.ListView.view && card.ListView.view.activeFocus && card.ListView.isCurrentItem ? design.accent : card.highlighted ? design.focusBorder : "transparent"
         }
         contentItem: ColumnLayout {
@@ -158,7 +159,16 @@ Dialog {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 4
-                    Text { Layout.fillWidth: true; text: card.row.title || "Сообщение"; color: design.ink; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 12
+                        Text { Layout.fillWidth: true; text: card.row.title || "Сообщение"; color: design.ink; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
+                        Text {
+                            objectName: "actionResultDate"
+                            visible: sheet.nativeMessageResults && Number(card.row.date || 0) > 0
+                            text: visible ? Qt.formatDateTime(new Date(Number(card.row.date) * 1000), "dd.MM.yyyy · HH:mm") : ""
+                            color: design.muted; font.pixelSize: 11
+                        }
+                    }
                     Text {
                         Layout.fillWidth: true
                         text: card.row.text || (sheet.picker ? card.row.preview || "" : sheet.mode === "members" ? (card.row.is_owner ? "Создатель" : card.row.is_admin ? "Администратор" : "Участник") : "")
@@ -260,6 +270,13 @@ Dialog {
             Label { objectName: "recipientSelectionCount"; Layout.fillWidth: true; text: "Выбрано: " + sheet.selectedPeers.length; color: design.accent }
             ToolButton { objectName: "clearRecipientSelection"; text: "Сбросить"; Accessible.name: "Сбросить выбор получателей"; onClicked: sheet.selectedPeers = [] }
         }
+        RowLayout {
+            Layout.fillWidth: true
+            visible: sheet.nativeMessageResults && results.count > 0
+            Text { objectName: "messageResultCount"; text: "Загружено: " + results.count; color: design.muted; font.pixelSize: 12 }
+            Item { Layout.fillWidth: true }
+            Text { text: "↑ ↓ — выбор · Enter — открыть"; color: design.muted; font.pixelSize: 11; visible: sheet.width >= 500 }
+        }
         ListView {
             id: results
             objectName: "actionResults"
@@ -268,7 +285,7 @@ Dialog {
             visible: sheet.picker || sheet.messageResults || sheet.mode === "members" || sheet.mode === "reacted"
             clip: true
             spacing: 4
-            model: !sheet.visible ? null : sheet.localChoices ? messenger.conversationChoices : sheet.remoteRows
+            model: !sheet.visible ? null : sheet.localChoices ? messenger.conversationChoices : sheet.nativeMessageResults ? sheet.controller.messageModel : sheet.remoteRows
             delegate: ResultCard { required property var modelData; row: modelData }
             activeFocusOnTab: true
             keyNavigationEnabled: true
@@ -296,7 +313,15 @@ Dialog {
                     else sheet.controller.loadAttachments(sheet.peer, sheet.attachmentType, true)
                 }
             }
-            Label { anchors.centerIn: parent; visible: results.count === 0 && !sheet.controller.busy && !searchDelay.running && !query.inputMethodComposing && !sheet.controller.error.length; text: query.text.trim().length ? "Ничего не найдено" : sheet.mode === "search" ? "Введите поисковый запрос" : "Пока ничего нет"; color: "#788697" }
+            Column {
+                objectName: "actionEmptyState"
+                anchors.centerIn: parent
+                width: Math.min(360, parent.width - 32); spacing: 12
+                visible: results.count === 0 && !sheet.controller.busy && !searchDelay.running && !query.inputMethodComposing && !sheet.controller.error.length
+                ActionIcon { anchors.horizontalCenter: parent.horizontalCenter; width: 36; height: 36; kind: sheet.mode === "important" ? "important" : "search"; stroke: design.muted }
+                Text { width: parent.width; text: query.text.trim().length ? "Ничего не найдено" : sheet.mode === "search" ? "Найти сообщение" : sheet.mode === "important" ? "Нет важных сообщений" : "Пока ничего нет"; color: design.ink; font.pixelSize: 16; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+                Text { width: parent.width; visible: sheet.mode === "search"; text: query.text.trim().length ? "Попробуйте другое слово или измените область поиска." : "Введите слово или фразу, чтобы найти сообщение."; color: design.muted; font.pixelSize: 13; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+            }
         }
         GridView {
             id: stickers

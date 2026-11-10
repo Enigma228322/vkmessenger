@@ -1310,7 +1310,7 @@ ApplicationWindow {
                         peer: messenger.selectedPeer
                         onLocationRequested: locationDialog.open()
                     }
-                    Flickable {
+                    ListView {
                         id: draftFiles
                         objectName: "draftAttachmentStrip"
                         Layout.fillWidth: true
@@ -1319,59 +1319,64 @@ ApplicationWindow {
                         visible: !window.editing && window.draftAttachments.length > 0
                         clip: true
                         boundsBehavior: Flickable.StopAtBounds
-                        flickableDirection: Flickable.HorizontalFlick
-                        contentWidth: attachmentChips.width
-                        contentHeight: height
-                        function revealChip(chip) {
-                            const left = chip.x, right = left + chip.width
-                            if (left < contentX) contentX = left
-                            else if (right > contentX + width) contentX = right - width
-                            contentX = Math.max(0, Math.min(contentX, Math.max(0, contentWidth - width)))
+                        orientation: ListView.Horizontal
+                        spacing: 8; cacheBuffer: 0; reuseItems: true
+                        activeFocusOnTab: true
+                        keyNavigationEnabled: true; keyNavigationWraps: false
+                        model: visible ? window.draftAttachments : []
+                        function revealCurrent() { if (currentIndex >= 0 && currentIndex < count) positionViewAtIndex(currentIndex, ListView.Contain) }
+                        function removeCurrent() {
+                            if (currentIndex < 0 || currentIndex >= count) return
+                            const sourceIndex = window.draftAttachments[currentIndex].sourceIndex
+                            window.focusComposer()
+                            messenger.transfers.remove(sourceIndex)
                         }
-                        function revealFocusedChip() {
-                            for (let i = 0; i < attachmentRepeater.count; ++i) {
-                                const chip = attachmentRepeater.itemAt(i)
-                                if (chip && chip.removeFocused) { revealChip(chip); return }
-                            }
+                        onCurrentIndexChanged: Qt.callLater(revealCurrent)
+                        onWidthChanged: Qt.callLater(revealCurrent)
+                        onModelChanged: { currentIndex = count ? 0 : -1; positionViewAtBeginning() }
+                        Accessible.name: "Вложения: " + count + (currentIndex >= 0 && currentIndex < count ? ". " + (window.draftAttachments[currentIndex].name || "Вложение") : "")
+                        Accessible.description: "Стрелки — выбор вложения, Delete — убрать, Escape — вернуться к сообщению"
+                        Keys.onEscapePressed: window.focusComposer()
+                        Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_Home && count) { currentIndex = 0; positionViewAtBeginning(); event.accepted = true }
+                            else if (event.key === Qt.Key_End && count) { currentIndex = count - 1; positionViewAtEnd(); event.accepted = true }
+                            else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) { removeCurrent(); event.accepted = true }
                         }
-                        onContentWidthChanged: Qt.callLater(revealFocusedChip)
-                        onWidthChanged: Qt.callLater(revealFocusedChip)
-                        Accessible.name: "Вложения: " + window.draftAttachments.length
                         ScrollBar.horizontal: ScrollBar { policy: ScrollBar.AsNeeded }
-                        Row {
-                            id: attachmentChips
-                            spacing: 8
-                            Repeater {
-                                id: attachmentRepeater
-                                model: window.draftAttachments
-                                delegate: Rectangle {
-                                    id: chip
-                                    objectName: "draftAttachmentChip"
-                                    required property var modelData
-                                    readonly property bool removeFocused: removeFileButton.activeFocus
-                                    width: Math.min(250, Math.max(170, attachmentName.implicitWidth + 82))
-                                    height: 50; radius: 12
-                                    color: window.secondarySurface; border.color: design.divider
-                                    Accessible.name: modelData.name || "Вложение"
-                                    ActionIcon {
-                                        x: 12; anchors.verticalCenter: parent.verticalCenter; width: 22; height: 22
-                                        kind: String(chip.modelData.attachment).indexOf("photo") === 0 ? "photo" : String(chip.modelData.attachment).indexOf("video") === 0 ? "video" : "document"
-                                        stroke: window.accent
-                                    }
-                                    Column {
-                                        x: 44; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 82; spacing: 3
-                                        Text { id: attachmentName; width: parent.width; text: chip.modelData.name || "Вложение"; textFormat: Text.PlainText; elide: Text.ElideMiddle; color: window.ink; font.pixelSize: 13 }
-                                        Text { width: parent.width; text: "Готово к отправке"; color: window.muted; font.pixelSize: 11; elide: Text.ElideRight }
-                                    }
-                                    HeaderAction {
-                                        id: removeFileButton
-                                        objectName: "removeDraftAttachment"
-                                        anchors.right: parent.right; anchors.rightMargin: 4; anchors.verticalCenter: parent.verticalCenter
-                                        width: 30; height: 30; kind: "close"; label: "Убрать вложение: " + (chip.modelData.name || "Вложение")
-                                        onActiveFocusChanged: if (activeFocus) Qt.callLater(draftFiles.revealFocusedChip)
-                                        onClicked: { window.focusComposer(); messenger.transfers.remove(chip.modelData.sourceIndex) }
-                                    }
-                                }
+                        delegate: Rectangle {
+                            id: chip
+                            objectName: "draftAttachmentChip"
+                            required property var modelData
+                            required property int index
+                            readonly property bool current: ListView.isCurrentItem && draftFiles.activeFocus
+                            width: Math.min(250, Math.max(170, attachmentName.implicitWidth + 82))
+                            height: 50; radius: 12
+                            color: window.secondarySurface; border.color: current ? window.accent : design.divider
+                            Accessible.role: Accessible.ListItem
+                            Accessible.name: modelData.name || "Вложение"
+                            Accessible.selected: current
+                            Accessible.onPressAction: { draftFiles.currentIndex = index; draftFiles.forceActiveFocus() }
+                            MouseArea {
+                                anchors.fill: parent; anchors.rightMargin: 38
+                                onClicked: { draftFiles.currentIndex = chip.index; draftFiles.forceActiveFocus() }
+                            }
+                            ActionIcon {
+                                x: 12; anchors.verticalCenter: parent.verticalCenter; width: 22; height: 22
+                                kind: String(chip.modelData.attachment).indexOf("photo") === 0 ? "photo" : String(chip.modelData.attachment).indexOf("video") === 0 ? "video" : "document"
+                                stroke: window.accent
+                            }
+                            Column {
+                                x: 44; anchors.verticalCenter: parent.verticalCenter; width: parent.width - 82; spacing: 3
+                                Text { id: attachmentName; width: parent.width; text: chip.modelData.name || "Вложение"; textFormat: Text.PlainText; elide: Text.ElideMiddle; color: window.ink; font.pixelSize: 13 }
+                                Text { width: parent.width; text: "Готово · " + (chip.index + 1) + " из " + draftFiles.count; color: window.muted; font.pixelSize: 11; elide: Text.ElideRight }
+                            }
+                            HeaderAction {
+                                id: removeFileButton
+                                objectName: "removeDraftAttachment"
+                                anchors.right: parent.right; anchors.rightMargin: 4; anchors.verticalCenter: parent.verticalCenter
+                                width: 30; height: 30; kind: "close"; label: "Убрать вложение: " + (chip.modelData.name || "Вложение")
+                                focusPolicy: Qt.NoFocus
+                                onClicked: { window.focusComposer(); messenger.transfers.remove(chip.modelData.sourceIndex) }
                             }
                         }
                     }
@@ -1413,7 +1418,7 @@ ApplicationWindow {
                         implicitHeight: composerRow.implicitHeight + 22
                         radius: 16
                         color: window.secondarySurface
-                        border.color: composer.activeFocus ? design.focusBorder : design.divider
+                        border.color: composer.overLimit ? design.errorText : composer.activeFocus ? design.focusBorder : design.divider
                         Behavior on border.color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
                         RowLayout {
                             id: composerRow
@@ -1427,6 +1432,8 @@ ApplicationWindow {
                                 TextArea {
                                     id: composer
                                     objectName: "composer"
+                                    readonly property bool overLimit: text.length > 4096
+                                    readonly property bool hasText: /\S/.test(text)
                                     Accessible.name: window.editing ? "Редактирование сообщения" : "Сообщение"
                                     placeholderText: messenger.canWrite ? "Написать сообщение…" : "Отправка сообщений в этот диалог недоступна"
                                     readOnly: !messenger.canWrite
@@ -1441,7 +1448,7 @@ ApplicationWindow {
                                     }
                                     function submit() { submitWithMode(false) }
                                     function submitWithMode(silent) {
-                                        if (inputMethodComposing) return
+                                        if (inputMethodComposing || overLimit) return
                                         if (window.editing) {
                                             if (!messenger.actions.busy) messenger.actions.editMessage(window.editingPeer, window.editingMessage, text)
                                             return
@@ -1477,7 +1484,7 @@ ApplicationWindow {
                                     ActionIcon { anchors.centerIn: parent; width: 22; height: 22; kind: sendButton.kind; stroke: sendButton.enabled ? "white" : window.muted; visible: !sendButton.busy }
                                     BusyIndicator { anchors.fill: parent; running: sendButton.busy; visible: running }
                                 }
-                                enabled: (window.editing ? (composer.text.trim().length > 0 || window.editingHasAttachments) : (composer.text.trim().length > 0 || window.draftAttachments.length > 0)) && !composer.inputMethodComposing && !messenger.sending && (!window.editing || !messenger.actions.busy) && !messenger.authorizing && messenger.canWrite
+                                enabled: (window.editing ? (composer.hasText || window.editingHasAttachments) : (composer.hasText || window.draftAttachments.length > 0)) && !composer.overLimit && !composer.inputMethodComposing && !messenger.sending && (!window.editing || !messenger.actions.busy) && !messenger.authorizing && messenger.canWrite
                                 onClicked: composer.submit()
                             }
                             HeaderAction {
@@ -1489,14 +1496,26 @@ ApplicationWindow {
                             }
                         }
                     }
-                    Text {
-                        Layout.alignment: Qt.AlignHCenter
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 24; Layout.rightMargin: 24
                         Layout.bottomMargin: 8
-                        text: "Enter — отправить · Shift + Enter — новая строка"
-                        opacity: composer.activeFocus ? 0.8 : 0
-                        Behavior on opacity { enabled: window.motionEnabled; NumberAnimation { duration: design.hoverDuration } }
-                        color: "#9aa6b4"
-                        font.pixelSize: 10
+                        Text {
+                            objectName: "composerHint"
+                            Layout.fillWidth: true
+                            text: composer.overLimit ? "Сократите сообщение на " + (composer.text.length - 4096) + " симв." : "Enter — отправить · Shift + Enter — новая строка"
+                            opacity: composer.activeFocus || composer.overLimit ? 0.9 : 0
+                            color: composer.overLimit ? design.errorText : window.muted
+                            font.pixelSize: 10; elide: Text.ElideRight
+                        }
+                        Text {
+                            objectName: "composerCharacterCount"
+                            text: composer.text.length + " / 4096"
+                            visible: composer.text.length >= 3500
+                            color: composer.overLimit ? design.errorText : window.muted
+                            font.pixelSize: 11
+                            Accessible.name: "Длина сообщения: " + composer.text.length + " из 4096"
+                        }
                     }
                 }
             }
@@ -1891,7 +1910,7 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 ActionButton { objectName: "notificationSettingsButton"; text: "Уведомления"; Layout.fillWidth: true; onClicked: notificationSettings.open() }
-                ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: { messenger.refreshCacheStats(); cacheDialog.open() } }
+                ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: cacheDialog.open() }
             }
             ActionButton {
                 objectName: "settingsVkApiLoginButton"
@@ -1976,22 +1995,7 @@ ApplicationWindow {
         }
 
     }
-    Dialog {
-        id: cacheDialog
-        parent: Overlay.overlay; anchors.centerIn: parent
-        title: "Данные и память"; modal: true; width: 460; standardButtons: Dialog.Close
-        contentItem: ColumnLayout {
-            spacing: 14
-            Label { text: "Сохранено сообщений: " + (messenger.cacheStats.messagesCount || 0) }
-            Label { text: "История: " + Math.ceil(((messenger.cacheStats.messagesBytes || 0) + (messenger.cacheStats.entitiesBytes || 0)) / 1048576) + " МиБ" }
-            Label { text: "В очереди отправки: " + (messenger.cacheStats.outgoingCount || 0) }
-            Label { Layout.fillWidth: true; text: "Очистка истории сохранит черновики и неотправленные сообщения. История будет снова загружена из VK при подключении."; wrapMode: Text.Wrap; color: window.muted }
-            Label { text: "Медиа: " + Math.ceil(messenger.media.bytes / 1048576) + " МиБ" }
-            ComboBox { model: ["256 МиБ", "1 ГиБ", "5 ГиБ", "10 ГиБ"]; currentIndex: messenger.media.limit <= 268435456 ? 0 : messenger.media.limit <= 1073741824 ? 1 : messenger.media.limit <= 5368709120 ? 2 : 3; onActivated: messenger.media.limit = [268435456, 1073741824, 5368709120, 10737418240][currentIndex] }
-            Button { text: "Очистить медиакэш"; onClicked: messenger.media.clear() }
-            Button { text: "Очистить сохранённую историю"; onClicked: messenger.clearHistoryCache() }
-        }
-    }
+    CacheDialog { id: cacheDialog }
     Dialog {
         id: locationDialog
         objectName: "locationDialog"

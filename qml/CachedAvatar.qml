@@ -4,8 +4,10 @@ import VK 1.0 as Native
 Native.AvatarImage {
     id: picture
     property url remoteSource: ""
-    function refresh() { source = remoteSource.toString().length ? messenger.media.source(remoteSource) : "" }
+    property bool active: true
+    function refresh() { source = active && remoteSource.toString().length ? messenger.media.source(remoteSource) : "" }
     onRemoteSourceChanged: refresh()
+    onActiveChanged: refresh()
     Component.onCompleted: refresh()
     Connections {
         target: messenger.media

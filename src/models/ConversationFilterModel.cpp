@@ -2,6 +2,87 @@
 #include "messaging/FolderController.h"
 #include <QTimer>
 
+FolderPeerModel::FolderPeerModel(QAbstractItemModel *source, QObject *parent)
+    : QSortFilterProxyModel(parent), m_source(source)
+{
+    m_missing.setItemRoleNames({{Qt::UserRole, "item"}});
+    m_missing.setColumnCount(1);
+    m_combined.addSourceModel(source); m_combined.addSourceModel(&m_missing);
+    setSourceModel(&m_combined);
+    const auto schedule = [this] {
+        if (m_savedPeers.isEmpty()) return;
+        if (m_rebuildPending) return;
+        m_rebuildPending = true;
+        QTimer::singleShot(0, this, [this] { m_rebuildPending = false; rebuildKnownPeers(); });
+    };
+    connect(source, &QAbstractItemModel::modelReset, this, schedule);
+    connect(source, &QAbstractItemModel::rowsInserted, this, schedule);
+    connect(source, &QAbstractItemModel::rowsRemoved, this, schedule);
+    connect(source, &QAbstractItemModel::dataChanged, this, schedule);
+    rebuildKnownPeers();
+}
+
+void FolderPeerModel::rebuildKnownPeers()
+{
+    if (m_savedPeers.isEmpty()) { m_known.clear(); rebuildMissingPeers(); return; }
+    m_known.clear(); m_known.reserve(m_source->rowCount());
+    for (int row = 0; row < m_source->rowCount(); ++row)
+        m_known.insert(m_source->data(m_source->index(row, 0), Qt::UserRole).toMap().value("peer").toString());
+    rebuildMissingPeers();
+}
+
+void FolderPeerModel::rebuildMissingPeers()
+{
+    QStringList missing;
+    for (const auto &peer : m_savedPeers) if (!m_known.contains(peer)) missing.append(peer);
+    if (missing == m_missingPeers) return;
+    m_missingPeers = missing;
+    m_missing.removeRows(0, m_missing.rowCount());
+    for (const auto &peer : missing) {
+        auto item = new QStandardItem;
+        item->setData(QVariantMap{{"peer", peer}, {"title", "Сохранённая переписка"}, {"missing", true}}, Qt::UserRole);
+        m_missing.appendRow(item);
+    }
+}
+
+void FolderPeerModel::setSavedPeers(const QStringList &value)
+{
+    QStringList peers; QSet<QString> unique;
+    for (const auto &peer : value) {
+        bool valid = false; const auto id = peer.toLongLong(&valid);
+        if (valid && id != 0 && !unique.contains(peer)) { peers.append(peer); unique.insert(peer); }
+    }
+    if (m_savedPeers == peers) return;
+    m_savedPeers = peers;
+    // A source update may have been queued immediately before opening the editor.
+    rebuildKnownPeers(); emit savedPeersChanged();
+}
+
+void FolderPeerModel::setQuery(const QString &value)
+{
+    const auto query = value.trimmed(); if (query == m_query) return;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+#endif
+    m_query = query;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    endFilterChange(Direction::Rows);
+#else
+    invalidateFilter();
+#endif
+    emit queryChanged();
+}
+
+bool FolderPeerModel::filterAcceptsRow(int row, const QModelIndex &parent) const
+{
+    return m_query.isEmpty() || sourceModel()->data(sourceModel()->index(row, 0, parent), Qt::UserRole).toMap().value("title").toString().contains(m_query, Qt::CaseInsensitive);
+}
+
+QVariantMap FolderPeerModel::get(int row) const
+{
+    return row >= 0 && row < rowCount() ? data(index(row, 0), Qt::UserRole).toMap() : QVariantMap();
+}
+
 ConversationPickerModel::ConversationPickerModel(QAbstractItemModel *source, QObject *parent)
     : QSortFilterProxyModel(parent) { setSourceModel(source); }
 

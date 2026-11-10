@@ -39,13 +39,13 @@ QString MediaCache::path(const QUrl &remote) const
 }
 QUrl MediaCache::cached(const QUrl &remote) const
 {
-    if (m_accountDirectory.isEmpty() || remote.scheme() != "https") return {};
+    if (m_accountDirectory.isEmpty() || m_accountDirectory == m_clearingDirectory || remote.scheme() != "https") return {};
     const auto file = path(remote);
     return QFileInfo::exists(file) ? QUrl::fromLocalFile(file) : QUrl();
 }
 QUrl MediaCache::source(const QUrl &remote)
 {
-    if (m_accountDirectory.isEmpty() || remote.scheme() != "https") return {};
+    if (m_accountDirectory.isEmpty() || m_accountDirectory == m_clearingDirectory || remote.scheme() != "https") return {};
     const auto local = cached(remote);
     if (!local.isEmpty()) {
         const auto file = local.toLocalFile();
@@ -137,7 +137,7 @@ void MediaCache::scan()
     auto watcher = new QFutureWatcher<QList<Entry>>(this);
     connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher] {
         const auto entries = watcher->result(); watcher->deleteLater();
-        for (const auto &entry : entries) if (!m_entries.contains(entry.path) && QFileInfo::exists(entry.path)) { m_entries.insert(entry.path, entry); m_bytes += entry.size; }
+        for (const auto &entry : entries) if ((m_clearingDirectory.isEmpty() || !entry.path.startsWith(m_clearingDirectory + '/')) && !m_entries.contains(entry.path) && QFileInfo::exists(entry.path)) { m_entries.insert(entry.path, entry); m_bytes += entry.size; }
         trim(); ++m_revision; emit changed();
     });
     watcher->setFuture(QtConcurrent::run([root = m_root] {
@@ -149,13 +149,39 @@ void MediaCache::scan()
 }
 void MediaCache::clear()
 {
+    if (clearing() || m_accountDirectory.isEmpty()) return;
     stop();
-    if (!m_accountDirectory.isEmpty()) {
-        QDir(m_accountDirectory).removeRecursively();
-        for (auto it = m_entries.begin(); it != m_entries.end();) {
-            if (it.key().startsWith(m_accountDirectory + '/')) { m_bytes -= it.value().size; it = m_entries.erase(it); }
-            else ++it;
-        }
+    const auto directory = m_accountDirectory;
+    m_clearingDirectory = directory; m_clearError.clear();
+    for (auto it = m_entries.begin(); it != m_entries.end();) {
+        if (it.key().startsWith(directory + '/')) { m_bytes -= it.value().size; it = m_entries.erase(it); }
+        else ++it;
     }
     m_errors.clear(); m_accessed.clear(); ++m_revision; emit sourcesReset(); emit changed();
+    // Only this account is blocked while the worker deletes its old files.
+    // Other accounts may continue loading, and this directory cannot be reused
+    // for a fresh download until the completion callback has reconciled entries.
+    auto watcher = new QFutureWatcher<QPair<bool, QList<Entry>>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, directory] {
+        const auto result = watcher->result(); watcher->deleteLater();
+        for (const auto &entry : result.second) { m_entries.insert(entry.path, entry); m_bytes += entry.size; }
+        m_clearingDirectory.clear();
+        m_clearError = result.first ? QString() : QStringLiteral("Часть файлов не удалось удалить. Попробуйте очистить кэш ещё раз.");
+        ++m_revision;
+        if (m_accountDirectory == directory) emit sourcesReset();
+        emit changed();
+    });
+    watcher->setFuture(QtConcurrent::run([directory] {
+        const QFileInfo info(directory);
+        const bool removed = !info.exists() || (info.isDir() && !info.isSymLink() && QDir(directory).removeRecursively());
+        QList<Entry> remaining;
+        if (!removed) {
+            QDirIterator it(directory, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                it.next(); const auto info = it.fileInfo();
+                if (info.fileName().size() == 64) remaining.append({info.absoluteFilePath(), info.size(), info.lastModified().toMSecsSinceEpoch()});
+            }
+        }
+        return qMakePair(removed, remaining);
+    }));
 }

@@ -83,6 +83,13 @@ Column {
             spacing: 4
             Loader {
                 Layout.fillWidth: true
+                Layout.preferredHeight: item ? item.implicitHeight : 0
+                active: row.modelData.type === "link"
+                visible: active
+                sourceComponent: LinkPreview { link: root.payload(row.modelData); loadImages: root.loadImages }
+            }
+            Loader {
+                Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Math.min(260, Math.max(140, root.width * 9 / 16)) : 0
                 active: row.modelData.type === "video"
                 visible: active
@@ -188,7 +195,7 @@ Column {
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: false
-                visible: row.modelData.type !== "sticker"
+                visible: row.modelData.type !== "sticker" && row.modelData.type !== "link"
                 Label { text: root.title(row.modelData); Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; textFormat: Text.PlainText }
                 Button {
                     objectName: "attachmentOpen"

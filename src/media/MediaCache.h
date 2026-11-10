@@ -14,6 +14,8 @@ class MediaCache : public QObject {
     Q_PROPERTY(qint64 bytes READ bytes NOTIFY changed)
     Q_PROPERTY(qint64 limit READ limit WRITE setLimit NOTIFY changed)
     Q_PROPERTY(int pending READ pending NOTIFY changed)
+    Q_PROPERTY(bool clearing READ clearing NOTIFY changed)
+    Q_PROPERTY(QString clearError READ clearError NOTIFY changed)
 public:
     explicit MediaCache(const QString &directory = {}, QObject *parent = nullptr, QNetworkAccessManager *network = nullptr);
     ~MediaCache() override;
@@ -22,6 +24,8 @@ public:
     qint64 bytes() const { return m_bytes; }
     qint64 limit() const { return m_limit; }
     int pending() const { return m_queue.size() + m_active.size(); }
+    bool clearing() const { return !m_clearingDirectory.isEmpty(); }
+    QString clearError() const { return m_clearError; }
     void setLimit(qint64 bytes);
     Q_INVOKABLE QUrl source(const QUrl &remote);
     Q_INVOKABLE QUrl cached(const QUrl &remote) const;
@@ -41,6 +45,7 @@ private:
     void stop();
     QSettings m_settings;
     QString m_root, m_accountDirectory;
+    QString m_clearingDirectory, m_clearError;
     QNetworkAccessManager m_defaultNetwork;
     QNetworkAccessManager *m_network;
     QQueue<QUrl> m_queue;

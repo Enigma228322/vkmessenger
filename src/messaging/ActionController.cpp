@@ -8,29 +8,34 @@
 #include <QClipboard>
 #include <QUrlQuery>
 #include <algorithm>
+#include <limits>
 
 namespace {
 QString identifier(const QJsonValue &value) { return LongPoll::cursor(value); }
 QString displayName(const QJsonObject &person) {
     return person.value("name").toString((person.value("first_name").toString() + ' ' + person.value("last_name").toString()).trimmed());
 }
-QUrl photoSource(const QJsonObject &photo) {
-    QUrl result; qint64 largest = -1;
+QUrl photoSource(const QJsonObject &photo, int thumbnailEdge = 0) {
+    QUrl result, thumbnail; qint64 largest = -1, smallest = std::numeric_limits<qint64>::max();
     for (const auto &value : photo.value("sizes").toArray()) {
         const auto size = value.toObject(); const QUrl url(size.value("url").toString());
         if (url.scheme() != "https" || url.host().isEmpty()) continue;
         const qint64 area = qint64(qMax(0, size.value("width").toInt())) * qMax(0, size.value("height").toInt());
         if (area > largest) { largest = area; result = url; }
+        if (thumbnailEdge > 0 && size.value("width").toInt() >= thumbnailEdge && size.value("height").toInt() >= thumbnailEdge && area < smallest) {
+            smallest = area; thumbnail = url;
+        }
     }
-    return result;
+    return thumbnail.isEmpty() ? result : thumbnail;
 }
 bool isPerson(const QString &value) { bool ok; auto id = value.toLongLong(&ok); return ok && id > 0 && id < 2000000000; }
 }
 
-ActionController::ActionController(Messenger *messenger) : QObject(messenger), m_messenger(messenger) {}
+ActionController::ActionController(Messenger *messenger) : QObject(messenger), m_messenger(messenger), m_messageModel(new ItemModel(this)) {}
+QAbstractListModel *ActionController::messageModel() const { return m_messageModel; }
 void ActionController::cancelPending() { ++m_generation; m_busy = false; emit changed(); }
 
-void ActionController::reset() { ++m_generation; m_results.clear(); m_error.clear(); m_inviteLink.clear(); m_searchQuery.clear(); m_searchPeer.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; m_memberCount = 0; emit changed(); }
+void ActionController::reset() { ++m_generation; m_results.clear(); m_messageModel->replace({}); m_error.clear(); m_inviteLink.clear(); m_searchQuery.clear(); m_searchPeer.clear(); m_busy = m_hasMore = m_cachedResults = false; m_offset = 0; m_memberCount = 0; emit changed(); }
 
 void ActionController::invoke(const QString &method, Form parameters, Callback callback, bool refresh)
 {
@@ -194,16 +199,24 @@ void ActionController::messageResults(const QJsonValue &value, bool append)
     QHash<QString, QJsonObject> peers;
     for (auto p : response.value("profiles").toArray()) peers[identifier(p.toObject().value("id"))] = p.toObject();
     for (auto p : response.value("groups").toArray()) peers[QString::number(-p.toObject().value("id").toInteger())] = p.toObject();
+    QHash<QString, int> positions;
+    for (int i = 0; i < m_results.size(); ++i) {
+        const auto row = m_results[i].toMap();
+        if (!row.value("cmid").toString().isEmpty()) positions.insert(row.value("peer").toString() + ':' + row.value("cmid").toString(), i);
+    }
     for (auto v : response.value("items").toArray()) {
         auto msg = v.toObject();
         const auto peer = identifier(msg.value("peer_id")), cmid = identifier(msg.value("conversation_message_id"));
-        const QVariantMap row{{"peer", peer}, {"cmid", cmid},
+        const auto key = peer + ':' + cmid;
+        const QVariantMap row{{"peer", peer}, {"cmid", cmid}, {"identity", cmid.isEmpty() ? QString() : key}, {"date", msg.value("date").toInteger()},
             {"title", displayName(peers.value(identifier(msg.value("from_id"))))}, {"text", msg.value("text").toString()}, {"attachments", safeJson(msg.value("attachments"))}};
-        auto existing = std::find_if(m_results.begin(), m_results.end(), [&peer, &cmid](const QVariant &item) {
-            const auto map = item.toMap(); return !cmid.isEmpty() && map.value("peer").toString() == peer && map.value("cmid").toString() == cmid;
-        });
-        if (existing == m_results.end()) m_results.append(row); else *existing = row;
+        const int existing = cmid.isEmpty() ? -1 : positions.value(key, -1);
+        if (existing < 0) {
+            if (!cmid.isEmpty()) positions.insert(key, m_results.size());
+            m_results.append(row);
+        } else m_results[existing] = row;
     }
+    m_messageModel->reconcile(m_results);
     m_hasMore = response.value("items").toArray().size() >= 50;
 }
 void ActionController::search(const QString &query, const QString &peer, bool nextPage)
@@ -366,7 +379,7 @@ void ActionController::openAttachment(const QVariantMap &attachment, const QVari
             const auto url = photoSource(photo);
             if (url.isEmpty()) continue;
             if (selectedIndex < 0 && url == selectedUrl) selectedIndex = photos.size();
-            photos.append(QVariantMap{{"source", url}, {"title", photo.value("text").toString("Фотография")}});
+            photos.append(QVariantMap{{"source", url}, {"thumbnail", photoSource(photo, 160)}, {"title", photo.value("text").toString("Фотография")}});
         }
         if (photos.size() > 1 && selectedIndex >= 0) emit photoGalleryRequested(photos, selectedIndex);
         else emit mediaRequested(selectedUrl, type, title);

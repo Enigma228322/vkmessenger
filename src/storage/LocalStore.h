@@ -19,6 +19,7 @@ public:
     void commitDiff(const QString &account, const QList<QJsonObject> &pages,
                     const QString &version, bool full, Result result, bool replaceConversations = false);
     void loadHistory(const QString &account, const QString &peer, Result result, qint64 before = 0);
+    void invalidateMessages(const QString &account, const QString &peer, const QJsonArray &cmids, Result result = {});
     void saveHistory(const QString &account, const QString &peer, const QJsonArray &messages,
                      const QJsonArray &ranges, bool older, bool newer, Result result = {});
     void saveDraft(const QString &account, const QString &peer, const QJsonObject &draft, Result result = {});

@@ -1,18 +1,21 @@
 #pragma once
 #include "Form.h"
 #include <QObject>
+#include <QAbstractListModel>
 #include <QUrl>
 #include <QJsonValue>
 #include <QVariantList>
 #include <functional>
 
 class Messenger;
+class ItemModel;
 
 class ActionController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QVariantList results READ results NOTIFY changed)
+    Q_PROPERTY(QAbstractListModel *messageModel READ messageModel CONSTANT)
     Q_PROPERTY(QString inviteLink READ inviteLink NOTIFY changed)
     Q_PROPERTY(int memberCount READ memberCount NOTIFY changed)
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY changed)
@@ -24,6 +27,7 @@ public:
     bool busy() const { return m_busy; }
     QString error() const { return m_error; }
     QVariantList results() const { return m_results; }
+    QAbstractListModel *messageModel() const;
     QString inviteLink() const { return m_inviteLink; }
     int memberCount() const { return m_memberCount; }
     bool hasMore() const { return m_hasMore; }
@@ -84,6 +88,7 @@ private:
     bool m_cachedResults = false;
     QString m_error, m_inviteLink;
     QVariantList m_results;
+    ItemModel *m_messageModel;
     QVariantList m_reactionAssets, m_selectableReactions;
     bool m_reactionsLoading = false;
     qint64 m_reactionsCachedAt = 0;

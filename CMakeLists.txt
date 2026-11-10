@@ -43,7 +43,7 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
 qt_add_qml_module(VK
     URI VK VERSION 1.0
-    QML_FILES qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
+    QML_FILES qml/CacheDialog.qml qml/LinkPreview.qml qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src src/media "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VK PRIVATE vkm-platform Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Multimedia opus rlottie::rlottie ZLIB::ZLIB)
@@ -147,4 +147,6 @@ if(BUILD_TESTING)
     target_link_libraries(sticker-tests PRIVATE Qt6::Test Qt6::Quick Qt6::Network Qt6::Concurrent rlottie::rlottie ZLIB::ZLIB)
     add_test(NAME sticker-tests COMMAND sticker-tests)
     set_tests_properties(voice-codec-tests media-cache-tests storage-tests protocol-tests messenger-tests longpoll-tests methods-tests transfers-tests sticker-tests PROPERTIES TIMEOUT 90)
+    # The expanded UI/network suite needs headroom beyond the 90-second default.
+    set_tests_properties(messenger-tests PROPERTIES TIMEOUT 120)
 endif()

@@ -219,6 +219,17 @@ void LocalStore::commitDiff(const QString &account, const QList<QJsonObject> &pa
     }, std::move(result));
 }
 
+void LocalStore::invalidateMessages(const QString &account, const QString &peer, const QJsonArray &cmids, Result result)
+{
+    run([account, peer, cmids](StoreWorker &w) {
+        w.transaction(w.cache, [&] {
+            for (const auto &value : cmids) if (value.toInteger() > 0)
+                w.query(w.cache, "UPDATE messages SET dirty=1 WHERE account=? AND peer=? AND cmid=?", {account, peer, value.toInteger()});
+        });
+        return QJsonObject();
+    }, std::move(result));
+}
+
 void LocalStore::loadHistory(const QString &account, const QString &peer, Result result, qint64 before)
 {
     run([account, peer, before](StoreWorker &w) {

@@ -507,6 +507,7 @@ QString Messenger::peerActivity() const
 void Messenger::applyLongPoll(const QJsonArray &events)
 {
     bool conversations = false, history = false, folders = false;
+    QHash<QString, QSet<qint64>> invalidated;
     for (const auto &raw : events) {
         ++m_eventRevision;
         const auto event = LongPollEvent::parse(raw);
@@ -558,6 +559,31 @@ void Messenger::applyLongPoll(const QJsonArray &events)
             break;
         case LongPollEvent::Persistent:
         case LongPollEvent::Notification:
+            if (event.type == 18 || event.type == 10018) {
+                const auto key = event.raw[1].toInteger();
+                if (event.type == 10018 && key > 0) invalidated[event.peer].insert(key);
+                const auto cached = m_histories.constFind(event.peer);
+                qint64 cmid = 0;
+                if (cached != m_histories.cend() && key > 0) {
+                    if (event.type == 10018 && cached->contains(key)) cmid = key;
+                    else if (event.type == 18) for (auto it = cached->cbegin(); it != cached->cend(); ++it)
+                        if (it.value().value("id").toInteger() == key) { cmid = it.key(); break; }
+                }
+                if (cmid > 0) {
+                    invalidated[event.peer].insert(cmid);
+                    // attachN_photo is an ID, not an image URL. Reload the full
+                    // message so LP and API use the same enriched attachments.
+                    m_contentDirty[event.peer].insert(cmid);
+                    ++m_contentRevision[event.peer];
+                    m_recentViews.remove(event.peer);
+                    history |= event.peer == m_peer;
+                } else if (event.type == 18) {
+                    // A legacy global ID may refer to an evicted message.
+                    // Let the diff supply its CMID and persisted dirty flags.
+                    conversations = true; history |= event.peer == m_peer;
+                }
+                break;
+            }
             conversations = true;
             history |= event.peer.isEmpty() || event.peer == m_peer;
             if (event.type == 4 || event.type == 10004) m_activity.remove(event.peer);
@@ -569,6 +595,13 @@ void Messenger::applyLongPoll(const QJsonArray &events)
             conversations = history = true;
             break;
         }
+    }
+    if (!m_account.isEmpty()) for (auto it = invalidated.cbegin(); it != invalidated.cend(); ++it) {
+        QJsonArray cmids; for (auto cmid : it.value()) cmids.append(cmid);
+        const auto generation = m_generation;
+        m_store.invalidateMessages(m_account, it.key(), cmids, [this, generation](const QJsonObject &, const QString &error) {
+            if (generation == m_generation && !error.isEmpty()) fail("Не удалось отметить обновлённое сообщение: " + error);
+        });
     }
     if (folders) m_folders.refresh();
     if (conversations || history) scheduleSync(conversations, history);
@@ -1024,13 +1057,21 @@ void Messenger::fetchHistory(bool older, bool latest, qint64 anchor, bool keepWi
     }
     if (m_fetchingHistory || m_peer.isEmpty() || m_offline || !m_connected || m_authorizing) return;
     m_fetchingHistory = true;
+    // A request started outside drainSync (including a stale-response retry)
+    // consumes the queued refresh as well; newer events will set it again.
+    m_historyDirty = false;
     m_loading = true;
     m_historyError.clear();
     emit changed();
     const auto generation = m_historyGeneration;
     const auto peer = m_peer;
     const auto revision = m_contentRevision.value(peer);
-    const auto dirty = m_contentDirty.value(peer);
+    auto dirty = m_contentDirty.value(peer);
+    if (m_publicMessages && dirty.size() > 100) {
+        QSet<qint64> batch;
+        for (auto cmid : dirty) { batch.insert(cmid); if (batch.size() == 100) break; }
+        dirty = batch;
+    }
     const auto cache = m_histories.value(peer);
     const bool replaceWindow = (anchor >= 0 && !keepWindow) || (latest && m_newer.value(peer));
     const auto mark = anchor >= 0 ? anchor : older && !cache.isEmpty() ? cache.firstKey() - 1 : qMax(qint64(0), m_lastCmid.value(peer) - 1);
@@ -1111,12 +1152,32 @@ void Messenger::fetchHistory(bool older, bool latest, qint64 anchor, bool keepWi
         publishHistory();
         if (latest) emit scrollToEnd();
         if (anchor >= 0) emit scrollToMessage(QString::number(anchor));
+        if (found) m_historyDirty |= !m_contentDirty.value(peer).isEmpty();
         if (m_historyDirty && !m_sync.isActive()) m_sync.start(120);
         emit changed();
     };
     if (m_publicMessages) {
         fetchPublicHistory(peer, anchor >= 0 ? anchor : older && !cache.isEmpty() ? cache.firstKey() : -1,
-            anchor >= 0 ? -25 : older ? 1 : 0, std::move(received));
+            anchor >= 0 ? -25 : older ? 1 : 0, [this, peer, dirty, received = std::move(received)](const QJsonValue &value, const QString &error) {
+                if (!error.isEmpty() || dirty.isEmpty()) { received(value, error); return; }
+                QStringList ids; for (auto cmid : dirty) ids.append(QString::number(cmid));
+                api("messages.getByConversationMessageId", {{"peer_id", peer}, {"conversation_message_ids", ids.join(',')}, {"extended", "1"}, {"group_id", groupId()}},
+                    [value, received](const QJsonValue &updated, const QString &error) {
+                        if (!error.isEmpty()) { received({}, error); return; }
+                        if (!updated.toObject().value("items").isArray()) { received({}, "VK не вернул обновлённые сообщения."); return; }
+                        auto response = value.toObject(); auto items = response.value("items").toArray();
+                        if (!items.isEmpty()) {
+                            auto item = items[0].toObject(); item.insert("requested_messages", updated.toObject().value("items")); items[0] = item;
+                            response.insert("items", items);
+                        }
+                        for (const auto &key : {"profiles", "groups"}) {
+                            auto entities = response.value(key).toArray();
+                            for (const auto &entity : updated.toObject().value(key).toArray()) entities.append(entity);
+                            response.insert(key, entities);
+                        }
+                        received(response, {});
+                    });
+            });
     } else {
         api("messages.getDiffContent", {{"conversation_messages", QString::fromUtf8(QJsonDocument(requests).toJson(QJsonDocument::Compact))},
             {"extended", "1"}, {"nested_limit", "2"}, {"group_id", groupId()}}, std::move(received));

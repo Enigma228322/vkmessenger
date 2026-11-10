@@ -116,6 +116,9 @@ private slots:
     }
     void modernEventsUseCorrectPeerAndCmidPositions() {
         QCOMPARE(LongPollEvent::parse(QJsonArray{10004, 91, 1, 999, 42}).peer, QString("42"));
+        const auto linkUpdate = LongPollEvent::parse(QJsonArray{18, 8642292, 2, -218837624, 1794323860LL, "google.com"});
+        QCOMPARE(linkUpdate.kind, LongPollEvent::Persistent); QCOMPARE(linkUpdate.peer, QString("-218837624"));
+        QCOMPARE(LongPollEvent::parse(QJsonArray{18, 1}).kind, LongPollEvent::Invalid);
         for (int type : {10001, 10002, 10003, 10005, 10018}) {
             const auto event = LongPollEvent::parse(QJsonArray{type, 91, 1, 42});
             QCOMPARE(event.peer, QString("42")); QCOMPARE(event.kind, LongPollEvent::Persistent);

@@ -28,6 +28,9 @@ struct LongPollEvent {
         case 10004:
             event.kind = a.size() >= 5 && peerAt(4) ? Persistent : Invalid;
             break;
+        case 18:
+            event.kind = a.size() >= 4 && peerAt(3) ? Persistent : Invalid;
+            break;
         case 10006: case 10007: case 10013: case 10014:
             if (a.size() >= 3 && peerAt(1)) event.kind = Persistent;
             break;

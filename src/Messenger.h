@@ -143,6 +143,7 @@ class Messenger : public QObject {
     Q_PROPERTY(ItemModel *conversations READ conversations CONSTANT)
     Q_PROPERTY(ConversationFilterModel *filteredConversations READ filteredConversations CONSTANT)
     Q_PROPERTY(ConversationPickerModel *conversationChoices READ conversationChoices CONSTANT)
+    Q_PROPERTY(FolderPeerModel *folderChoices READ folderChoices CONSTANT)
     Q_PROPERTY(ItemModel *messages READ messages CONSTANT)
     Q_PROPERTY(DesktopNotifications *notifications READ notifications CONSTANT)
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
@@ -200,6 +201,7 @@ public:
     ItemModel *conversations() { return &m_conversations; }
     ConversationFilterModel *filteredConversations() { return &m_filteredConversations; }
     ConversationPickerModel *conversationChoices() { return &m_conversationChoices; }
+    FolderPeerModel *folderChoices() { return &m_folderChoices; }
     ItemModel *messages() { return &m_messages; }
     bool connected() const { return m_connected; }
     bool demo() const { return m_demo; }
@@ -368,6 +370,7 @@ private:
     ItemModel m_conversations, m_messages;
     ConversationFilterModel m_filteredConversations{&m_conversations, &m_folders, this};
     ConversationPickerModel m_conversationChoices{&m_conversations, this};
+    FolderPeerModel m_folderChoices{&m_conversations, this};
     QJsonObject m_session;
     QHash<QString, QJsonObject> m_rawConversations, m_peers;
     DesktopNotifications *m_notifications = nullptr;
