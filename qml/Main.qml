@@ -1070,15 +1070,18 @@ ApplicationWindow {
                                         elide: Text.ElideRight
                                         color: window.accent; font.pixelSize: 14; font.weight: Font.DemiBold
                                     }
-                                    ReplyPreview {
-                                        objectName: "messageReplyPreview"
+                                    Loader {
                                         width: bubbleLayout.width
-                                        visible: !!entry.item.raw && !!entry.item.raw.reply_message
-                                        message: entry.item.raw ? entry.item.raw.reply_message || {} : ({})
-                                        author: entry.item.replyAuthor || "Сообщение"
-                                        loadImages: entry.inViewport
-                                        clickable: !!(message.conversation_message_id || message.cmid)
-                                        onActivated: messenger.openMessage(messenger.selectedPeer, String(message.conversation_message_id || message.cmid))
+                                        active: !!entry.item.raw && !!entry.item.raw.reply_message
+                                        visible: active; height: item ? item.implicitHeight : 0
+                                        sourceComponent: ReplyPreview {
+                                            objectName: "messageReplyPreview"
+                                            message: entry.item.raw ? entry.item.raw.reply_message || ({}) : ({})
+                                            author: entry.item.replyAuthor || "Сообщение"
+                                            loadImages: entry.inViewport
+                                            clickable: !!(message.conversation_message_id || message.cmid)
+                                            onActivated: messenger.openMessage(messenger.selectedPeer, String(message.conversation_message_id || message.cmid))
+                                        }
                                     }
                                     TextEdit {
                                         id: messageText
@@ -1097,22 +1100,43 @@ ApplicationWindow {
                                         font.pixelSize: design.bodySize
                                         selectionColor: "#adcfff"
                                     }
-                                    AttachmentView { width: bubbleLayout.width; loadImages: entry.y + entry.height > history.contentY - history.height && entry.y < history.contentY + 2 * history.height; photoBackground: window.flatMessages ? window.surface : bubble.color; attachments: entry.item.attachments || []; animationsEnabled: entry.inViewport && window.active && !messenger.reduceMotion }
-                                    BotKeyboard {
+                                    Loader {
                                         width: bubbleLayout.width
-                                        keyboard: entry.item.raw ? entry.item.raw.keyboard || {} : ({})
-                                        peer: messenger.selectedPeer
-                                        cmid: entry.item.id
-                                        author: entry.item.raw ? String(entry.item.raw.from_id) : ""
-                                        onLocationRequested: locationDialog.open()
+                                        active: (entry.item.attachments || []).length > 0
+                                        visible: active; height: item ? item.implicitHeight : 0
+                                        sourceComponent: AttachmentView {
+                                            objectName: "messageAttachments"
+                                            attachments: entry.item.attachments || []
+                                            loadImages: entry.y + entry.height > history.contentY - history.height && entry.y < history.contentY + 2 * history.height
+                                            photoBackground: window.flatMessages ? window.surface : bubble.color
+                                            animationsEnabled: entry.inViewport && window.active && !messenger.reduceMotion
+                                        }
                                     }
-                                    Repeater {
-                                        model: entry.item.raw ? entry.item.raw.fwd_messages || [] : []
-                                        delegate: ColumnLayout {
-                                            required property var modelData
-                                            width: bubbleLayout.width
-                                            Label { Layout.fillWidth: true; text: "↪ " + modelData.text; wrapMode: Text.Wrap; color: "#6485a8"; textFormat: Text.PlainText }
-                                            AttachmentView { Layout.fillWidth: true; loadImages: entry.y + entry.height > history.contentY - history.height && entry.y < history.contentY + 2 * history.height; photoBackground: window.flatMessages ? window.surface : bubble.color; attachments: modelData.attachments || []; animationsEnabled: entry.inViewport && window.active && !messenger.reduceMotion }
+                                    Loader {
+                                        width: bubbleLayout.width
+                                        active: !!entry.item.raw && !!entry.item.raw.keyboard && (entry.item.raw.keyboard.buttons || []).length > 0
+                                        visible: active; height: item ? item.implicitHeight : 0
+                                        sourceComponent: BotKeyboard {
+                                            objectName: "messageBotKeyboard"
+                                            keyboard: entry.item.raw ? entry.item.raw.keyboard || ({}) : ({})
+                                            peer: messenger.selectedPeer; cmid: String(entry.item.id)
+                                            author: entry.item.raw ? String(entry.item.raw.from_id || "") : ""
+                                            onLocationRequested: locationDialog.open()
+                                        }
+                                    }
+                                    Loader {
+                                        id: forwardedLoader
+                                        width: bubbleLayout.width
+                                        active: !!entry.item.raw && (entry.item.raw.fwd_messages || []).length > 0
+                                        visible: active; height: item ? item.implicitHeight : 0
+                                        sourceComponent: ForwardedMessages {
+                                            messages: entry.item.raw ? entry.item.raw.fwd_messages || [] : []
+                                            messageKey: String(entry.item.identity || entry.item.id)
+                                            loadImages: true
+                                            viewportTop: entry.y + bubble.y + bubbleLayout.y + forwardedLoader.y - history.contentY
+                                            viewportHeight: history.height
+                                            photoBackground: design.secondary
+                                            animationsEnabled: window.active && !messenger.reduceMotion
                                         }
                                     }
                                     Flow {
@@ -1351,15 +1375,32 @@ ApplicationWindow {
                             }
                         }
                     }
-                    RowLayout {
+                    TransferCard {
+                        objectName: "uploadTransferCard"
                         Layout.fillWidth: true
-                        Layout.leftMargin: 22
-                        Layout.rightMargin: 22
-                        visible: messenger.transfers.busy || messenger.transfers.error.length > 0 || messenger.transfers.downloading
-                        Label { objectName: "transferStatus"; Layout.fillWidth: true; Layout.minimumWidth: 0; text: messenger.transfers.error || (messenger.transfers.downloading ? "Скачивание файла…" : (messenger.transfers.status.length ? messenger.transfers.status + " · " : "") + messenger.transfers.filename); textFormat: Text.PlainText; wrapMode: messenger.transfers.error.length ? Text.Wrap : Text.NoWrap; elide: messenger.transfers.error.length ? Text.ElideNone : Text.ElideRight; font.pixelSize: 12; color: messenger.transfers.error.length ? design.errorText : window.muted; ToolTip.visible: transferHover.hovered && text.length > 0; ToolTip.text: text; HoverHandler { id: transferHover } }
-                        ProgressBar { value: messenger.transfers.progress; indeterminate: value <= 0 || value >= 1; visible: messenger.transfers.busy; Layout.preferredWidth: 100 }
-                        Button { text: "Повторить"; visible: messenger.transfers.error.length > 0 && messenger.transfers.canRetry; onClicked: messenger.transfers.retry() }
-                        Button { text: "Отмена"; onClicked: { messenger.transfers.cancel(); messenger.transfers.cancelDownload() } }
+                        Layout.leftMargin: 24; Layout.rightMargin: 24; Layout.bottomMargin: 8
+                        visible: busy || error.length > 0
+                        filename: messenger.transfers.filename; status: messenger.transfers.status
+                        error: messenger.transfers.uploadError; busy: messenger.transfers.busy
+                        canRetry: messenger.transfers.uploadCanRetry
+                        progress: messenger.transfers.progress; transferred: messenger.transfers.sentBytes; total: messenger.transfers.totalBytes
+                        waiting: Math.max(0, messenger.transfers.queuedCount - 1)
+                        statusObjectName: "transferStatus"; actionPrefix: "uploadTransfer"
+                        onRetryRequested: messenger.transfers.retryUpload()
+                        onCancelRequested: { messenger.transfers.cancel(); window.focusComposer() }
+                    }
+                    TransferCard {
+                        objectName: "downloadTransferCard"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 24; Layout.rightMargin: 24; Layout.bottomMargin: 8
+                        visible: busy || error.length > 0
+                        download: true; filename: messenger.transfers.downloadFilename
+                        status: "Скачивание файла…"; error: messenger.transfers.downloadError
+                        busy: messenger.transfers.downloading; canRetry: messenger.transfers.downloadCanRetry
+                        progress: messenger.transfers.downloadProgress; transferred: messenger.transfers.receivedBytes; total: messenger.transfers.downloadTotalBytes
+                        statusObjectName: "downloadTransferStatus"; actionPrefix: "downloadTransfer"
+                        onRetryRequested: messenger.transfers.retryDownload()
+                        onCancelRequested: { messenger.transfers.cancelDownload(); window.focusComposer() }
                     }
                     Rectangle {
                         objectName: "composerPanel"
@@ -1777,6 +1818,58 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: notificationSettings
+        objectName: "notificationSettings"
+        anchors.centerIn: parent; width: Math.min(480, window.width - 48)
+        title: "Уведомления"; modal: true; padding: 24
+        header: Label { text: notificationSettings.title; color: window.ink; font.pixelSize: 18; font.weight: Font.DemiBold; leftPadding: 24; rightPadding: 24; topPadding: 20; bottomPadding: 8 }
+        footer: Item {
+            implicitHeight: 64
+            ActionButton { anchors.right: parent.right; anchors.rightMargin: 24; anchors.top: parent.top; anchors.topMargin: 8; text: "Закрыть"; onClicked: notificationSettings.close() }
+        }
+        onOpened: messenger.notifications.refreshPermission()
+        background: Rectangle { radius: 16; color: window.surface; border.color: design.divider }
+        contentItem: ColumnLayout {
+            spacing: 12
+            CheckBox {
+                objectName: "desktopNotificationsEnabled"
+                text: "Уведомления о новых сообщениях"
+                checked: messenger.notifications.enabled
+                enabled: messenger.notifications.supported
+                onToggled: messenger.notifications.enabled = checked
+            }
+            CheckBox {
+                objectName: "desktopNotificationsPreview"
+                text: "Показывать отправителя и текст"
+                checked: messenger.notifications.preview; enabled: messenger.notifications.enabled && messenger.notifications.supported
+                onToggled: messenger.notifications.preview = checked
+            }
+            CheckBox {
+                objectName: "desktopNotificationsSound"
+                text: "Звук уведомлений"
+                checked: messenger.notifications.sound; enabled: messenger.notifications.enabled && messenger.notifications.supported
+                onToggled: messenger.notifications.sound = checked
+            }
+            Label {
+                Layout.fillWidth: true; wrapMode: Text.Wrap; color: window.muted; font.pixelSize: 12
+                text: "Работают, пока VK запущен, в том числе в фоне и в свёрнутом окне. Активная переписка и беседы с отключёнными уведомлениями не отвлекают."
+            }
+            Label {
+                objectName: "desktopNotificationPermission"
+                Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                text: !messenger.notifications.supported ? "Системные уведомления недоступны."
+                    : messenger.notifications.error || ({granted: "Уведомления разрешены macOS.", denied: "Уведомления запрещены в настройках macOS.", notDetermined: "При включении macOS запросит разрешение.", error: "Не удалось получить разрешение macOS."})[messenger.notifications.permission] || "Проверяем разрешение…"
+                color: messenger.notifications.permission === "denied" || messenger.notifications.error.length ? design.errorText : window.muted
+            }
+            ActionButton {
+                Layout.fillWidth: true
+                visible: messenger.notifications.supported && (messenger.notifications.permission === "denied" || messenger.notifications.permission === "error")
+                text: "Открыть настройки macOS"
+                onClicked: messenger.notifications.openSystemSettings()
+            }
+        }
+    }
+    Dialog {
         id: settings
         anchors.centerIn: parent
         width: Math.min(540, window.width - 60)
@@ -1795,7 +1888,11 @@ ApplicationWindow {
             CheckBox { text: "Тёмная тема"; checked: window.darkTheme; onToggled: messenger.darkTheme = checked }
             CheckBox { text: "Сообщения без пузырей"; checked: window.flatMessages; onToggled: messenger.flatMessages = checked }
             CheckBox { text: "Уменьшить анимацию"; checked: messenger.reduceMotion; onToggled: messenger.reduceMotion = checked }
-            ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: { messenger.refreshCacheStats(); cacheDialog.open() } }
+            RowLayout {
+                Layout.fillWidth: true
+                ActionButton { objectName: "notificationSettingsButton"; text: "Уведомления"; Layout.fillWidth: true; onClicked: notificationSettings.open() }
+                ActionButton { text: "Данные и память"; Layout.fillWidth: true; enabled: messenger.connected && !messenger.demo; onClicked: { messenger.refreshCacheStats(); cacheDialog.open() } }
+            }
             ActionButton {
                 objectName: "settingsVkApiLoginButton"
                 text: "Войти через VK API"
@@ -1897,6 +1994,7 @@ ApplicationWindow {
     }
     Dialog {
         id: locationDialog
+        objectName: "locationDialog"
         parent: Overlay.overlay; anchors.centerIn: parent
         title: "Местоположение"; modal: true; standardButtons: Dialog.Close
         Label { text: "Выбор места на карте пока недоступен. Можно отправить ссылку на место из приложения карт."; width: 350; wrapMode: Text.Wrap }

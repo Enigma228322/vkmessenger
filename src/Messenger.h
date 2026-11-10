@@ -1,4 +1,5 @@
 #pragma once
+#include "platform/DesktopNotifications.h"
 #include "OAuth.h"
 #include "LongPoll.h"
 #include "Transfers.h"
@@ -143,6 +144,7 @@ class Messenger : public QObject {
     Q_PROPERTY(ConversationFilterModel *filteredConversations READ filteredConversations CONSTANT)
     Q_PROPERTY(ConversationPickerModel *conversationChoices READ conversationChoices CONSTANT)
     Q_PROPERTY(ItemModel *messages READ messages CONSTANT)
+    Q_PROPERTY(DesktopNotifications *notifications READ notifications CONSTANT)
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
     Q_PROPERTY(bool demo READ demo NOTIFY changed)
     Q_PROPERTY(bool sending READ sending NOTIFY changed)
@@ -193,7 +195,7 @@ class Messenger : public QObject {
     Q_PROPERTY(QUrl toastUrl MEMBER m_toastUrl NOTIFY changed)
     Q_PROPERTY(QVariantList restorable MEMBER m_restorable NOTIFY changed)
 public:
-    explicit Messenger(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr, const QString &storagePath = {}, bool persistentSession = true);
+    explicit Messenger(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr, const QString &storagePath = {}, bool persistentSession = true, std::unique_ptr<NotificationBackend> notificationBackend = {});
     ~Messenger() override;
     ItemModel *conversations() { return &m_conversations; }
     ConversationFilterModel *filteredConversations() { return &m_filteredConversations; }
@@ -206,6 +208,9 @@ public:
     bool authorizing() const { return m_authorizing; }
     QString title() const { return m_title; }
     QString selectedPeer() const { return m_peer; }
+    DesktopNotifications *notifications() const { return m_notifications; }
+    QString notificationAccount() const { return m_account; }
+    bool openNotification(const QString &account, const QString &peer, const QString &cmid);
     QString error() const { return m_error; }
     QString status() const { return m_demo ? "Деморежим · локальные сообщения" : m_offline ? "Нет сети · сохранённые переписки" : m_status; }
     bool offline() const { return m_offline; }
@@ -286,6 +291,7 @@ public:
     Q_INVOKABLE void dismissRestore() { if (!m_restorable.isEmpty()) { m_restorable.removeLast(); emit changed(); } }
     Q_INVOKABLE void clearError() { m_error.clear(); emit changed(); }
 signals:
+    void notificationRequested(const QString &account, const QString &peer, const QString &cmid, const QString &title, const QString &body);
     void changed();
     void messageSent(const QString &peer);
     void realtimeEvent(int type, const QJsonArray &payload);
@@ -364,6 +370,9 @@ private:
     ConversationPickerModel m_conversationChoices{&m_conversations, this};
     QJsonObject m_session;
     QHash<QString, QJsonObject> m_rawConversations, m_peers;
+    DesktopNotifications *m_notifications = nullptr;
+    QHash<QString, qint64> m_notificationHighWater;
+    bool m_notificationBaseline = false;
     QHash<QString, qint64> m_profileFetchedAt;
     QSet<QString> m_profilesLoading, m_pendingProfilePeers;
     QTimer m_profileTimer;

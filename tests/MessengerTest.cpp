@@ -107,6 +107,19 @@ public slots:
     void capture(const QUrl &value) { url = value; }
 };
 
+class FakeNotificationBackend : public NotificationBackend {
+public:
+    Activation activation;
+    QString authorization = "granted";
+    QList<DesktopNotice> shown;
+    int requests = 0, cleared = 0;
+    void setActivation(Activation callback) override { activation = std::move(callback); }
+    void permission(bool request, Completion complete) override { requests += request; complete(authorization); }
+    void deliver(const DesktopNotice &notice, Completion complete) override { shown.append(notice); complete({}); }
+    void clear() override { ++cleared; }
+    void openSettings() override {}
+};
+
 static QUrl startApiLogin(Messenger &messenger)
 {
     LoginBrowserCapture browser;
@@ -131,6 +144,91 @@ private slots:
         QCoreApplication::instance()->setProperty("vkmStoragePath", m_storage.path());
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_storage.path() + "/settings");
+    }
+
+    void notificationsIgnoreInitialHistoryDuplicatesMutedAndReadMessages()
+    {
+        TokenNetwork network;
+        const auto snapshot = [](int version, int cmid, QString text, bool read = false, bool silent = false) {
+            QJsonArray infos;
+            for (int peer : {77, 88, 99}) {
+                QJsonObject conversation{{"peer", QJsonObject{{"id", peer}}}, {"last_conversation_message_id", cmid}, {"unread_count", read ? 0 : 1}, {"in_read_cmid", read ? cmid : 0}};
+                if (peer == 99) conversation.insert("push_settings", QJsonObject{{"disabled_forever", true}});
+                QJsonObject message{{"peer_id", peer}, {"conversation_message_id", cmid}, {"text", text}, {"out", peer == 88 ? 1 : 0}, {"is_silent", silent}};
+                infos.append(QJsonObject{{"conversation", conversation}, {"message", QJsonArray{message}}});
+            }
+            return QJsonDocument(QJsonObject{{"response", QJsonObject{{"server_version", QString::number(version)}, {"credentials", QJsonObject{{"server_lp", "lp.test/im"}, {"key", "key"}, {"ts", "100"}}}, {"conversations_info", infos}, {"profiles", QJsonArray{QJsonObject{{"id", 77}, {"first_name", "Анна"}}}}}}}).toJson();
+        };
+        network.responses["messages.getDiff"] = {snapshot(500, 1, "Начальная история")};
+        Messenger messenger(nullptr, &network);
+        QSignalSpy notifications(&messenger, &Messenger::notificationRequested);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 3); QCOMPARE(notifications.count(), 0);
+        const auto preview = [&] { return messenger.conversations()->get(messenger.conversations()->find("77")).value("preview").toString(); };
+        network.responses["messages.getDiff"] = {snapshot(501, 2, "Новое сообщение")}; messenger.reload();
+        QTRY_COMPARE(preview(), QString("Новое сообщение")); QCOMPARE(notifications.count(), 1);
+        QCOMPARE(notifications.first()[1].toString(), "77"); QCOMPARE(notifications.first()[2].toString(), "2"); QCOMPARE(notifications.first()[3].toString(), "Анна");
+        network.responses["messages.getDiff"] = {snapshot(502, 2, "Редактирование")}; messenger.reload();
+        QTRY_COMPARE(preview(), QString("Редактирование")); QCOMPARE(notifications.count(), 1);
+        network.responses["messages.getDiff"] = {snapshot(503, 3, "Прочитано", true)}; messenger.reload();
+        QTRY_COMPARE(preview(), QString("Прочитано")); QCOMPARE(notifications.count(), 1);
+        network.responses["messages.getDiff"] = {snapshot(504, 4, "Без уведомления", false, true)}; messenger.reload();
+        QTRY_COMPARE(preview(), QString("Без уведомления")); QCOMPARE(notifications.count(), 1);
+        network.responses["messages.getDiff"] = {snapshot(505, 5, "Следующее входящее")}; messenger.reload();
+        QTRY_COMPARE(preview(), QString("Следующее входящее")); QCOMPARE(notifications.count(), 2);
+        QVERIFY(!messenger.openNotification("other-account", "77", "5"));
+    }
+
+    void desktopNotificationsRespectFocusPrivacyAndActivation()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":1},"message":[{"conversation_message_id":1,"peer_id":77,"text":"Fixture"}]}]}})"};
+        Messenger messenger(nullptr, &network); messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        messenger.selectConversation("77", "Анна");
+        auto backend = std::make_unique<FakeNotificationBackend>(); auto fake = backend.get();
+        DesktopNotifications notifications(messenger, std::move(backend));
+        notifications.setEnabled(true); QCOMPARE(fake->requests, 1); QCOMPARE(notifications.permission(), "granted");
+        QQuickWindow window; window.show(); window.requestActivate(); QTRY_VERIFY(window.isActive()); notifications.setWindow(&window);
+        const auto account = messenger.notificationAccount();
+        const auto send = [&](const QString &peer) { messenger.notificationRequested(account, peer, "2", "Анна", "Личный текст"); };
+        send("77"); QCOMPARE(fake->shown.size(), 0);
+        send("88"); QCOMPARE(fake->shown.size(), 1); QCOMPARE(fake->shown.last().body, "Личный текст");
+        window.hide(); send("77"); QCOMPARE(fake->shown.size(), 2);
+        notifications.setPreview(false); notifications.setSound(false); send("88");
+        QCOMPARE(fake->shown.size(), 3); QCOMPARE(fake->shown.last().title, "VK"); QCOMPARE(fake->shown.last().body, "Новое сообщение"); QVERIFY(!fake->shown.last().sound);
+        notifications.setEnabled(false); send("88"); QCOMPARE(fake->shown.size(), 3); QVERIFY(fake->cleared > 0);
+        fake->authorization = "denied"; notifications.setEnabled(true); send("88"); QCOMPARE(fake->shown.size(), 3);
+        fake->authorization = "granted"; notifications.refreshPermission();
+        fake->activation("other-account", "88", "2"); QCOMPARE(messenger.selectedPeer(), "77");
+        fake->activation(account, "88", "2"); QCOMPARE(messenger.selectedPeer(), "88"); QTRY_VERIFY(window.isVisible());
+        notifications.setEnabled(false);
+    }
+
+    void notificationSettingsControlPermissionAndPrivacy()
+    {
+        auto backend = std::make_unique<FakeNotificationBackend>(); auto fake = backend.get();
+        Messenger messenger(nullptr, nullptr, {}, false, std::move(backend)); messenger.startDemo();
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window); window->resize(780, 560);
+        auto dialog = window->findChild<QObject *>("notificationSettings"); QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open")); QTRY_VERIFY(dialog->property("opened").toBool());
+        const auto click = [window](QQuickItem *item) { QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint()); };
+        auto enabled = dialog->findChild<QQuickItem *>("desktopNotificationsEnabled"); QVERIFY(enabled);
+        auto preview = dialog->findChild<QQuickItem *>("desktopNotificationsPreview"); QVERIFY(preview);
+        auto sound = dialog->findChild<QQuickItem *>("desktopNotificationsSound"); QVERIFY(sound);
+        QVERIFY(!enabled->property("checked").toBool()); click(enabled); QTRY_VERIFY(messenger.notifications()->enabled()); QCOMPARE(fake->requests, 1);
+        click(preview); QTRY_VERIFY(!messenger.notifications()->preview());
+        click(sound); QTRY_VERIFY(!messenger.notifications()->sound());
+        auto status = dialog->findChild<QQuickItem *>("desktopNotificationPermission"); QVERIFY(status);
+        QVERIFY(status->property("text").toString().contains("разрешены"));
+        for (bool dark : {false, true}) {
+            messenger.setDarkTheme(dark); QTest::qWait(50);
+            QVERIFY(dialog->property("height").toReal() < window->height() - 30);
+            if (qEnvironmentVariableIsSet("VKM_NOTIFICATIONS_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_NOTIFICATIONS_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
+        }
+        click(enabled); QTRY_VERIFY(!messenger.notifications()->enabled()); QVERIFY(fake->cleared > 0);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close")); QCOMPARE(warnings.count(), 0);
     }
 
     void configuredVkIdProvidesProductionHttpsReturn()
@@ -2027,6 +2125,119 @@ private slots:
         QVERIFY(avatar->property("source").toString().isEmpty());
     }
 
+    void messageContentLoadsOnlyWhenPresent()
+    {
+        TokenNetwork network;
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        const auto named = [window](const QString &name) {
+            QList<QQuickItem *> result;
+            const auto collect = [&](auto &&self, QQuickItem *item) -> void { if (item->objectName() == name) result.append(item); for (auto child : item->childItems()) self(self, child); };
+            collect(collect, window->contentItem()); return result;
+        };
+        QVariantList plain;
+        for (int i = 1; i <= 3000; ++i) plain.append(QVariantMap{{"id", QString::number(i)}, {"text", "Обычное сообщение"}, {"time", "12:00"}});
+        messenger.messages()->replace(plain);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        QTRY_COMPARE(history->property("count").toInt(), 3000);
+        QTRY_VERIFY(named("messageRow").size() > 0); QVERIFY(named("messageRow").size() < 50);
+        for (const auto &name : {"messageReplyPreview", "messageAttachments", "messageBotKeyboard", "forwardedMessages"}) QCOMPARE(named(name).size(), 0);
+        const QVariantList attachments{QVariantMap{{"type", "doc"}, {"doc", QVariantMap{{"title", "Документ.pdf"}, {"url", "https://assets.test/document"}}}}};
+        const QVariantMap keyboard{{"buttons", QVariantList{QVariantList{QVariantMap{{"action", QVariantMap{{"type", "location"}}}}}}}};
+        QVariantMap row{{"id", "1"}, {"text", "Содержимое сообщения"}, {"time", "12:00"}, {"attachments", attachments}, {"replyAuthor", "Автор ответа"},
+            {"raw", QVariantMap{{"from_id", "77"}, {"reply_message", QVariantMap{{"text", "Ответ на сообщение"}}}, {"keyboard", keyboard}, {"fwd_messages", QVariantList{QVariantMap{{"text", "Пересланный текст"}}}}}}};
+        messenger.messages()->replace({row});
+        for (const auto &name : {"messageReplyPreview", "messageAttachments", "messageBotKeyboard", "forwardedMessages"}) QTRY_COMPARE(named(name).size(), 1);
+        QCOMPARE(named("messageReplyPreview").first()->property("summary").toString(), "Ответ на сообщение");
+        QCOMPARE(named("messageBotKeyboard").first()->property("cmid").toString(), "1");
+        QCOMPARE(named("messageBotKeyboard").first()->property("peer").toString(), messenger.selectedPeer());
+        auto bot = named("messageBotKeyboard").first(); QSignalSpy location(bot, SIGNAL(locationRequested()));
+        const QVariantMap locationAction{{"type", "location"}};
+        QVERIFY(QMetaObject::invokeMethod(bot, "click", Q_ARG(QVariant, locationAction)));
+        QCOMPARE(location.count(), 1);
+        auto dialog = window->findChild<QObject *>("locationDialog"); QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        for (const auto &name : {"messageReplyPreview", "messageAttachments", "messageBotKeyboard", "forwardedMessages"}) QTRY_VERIFY(named(name).first()->height() > 0);
+        messenger.messages()->reconcile({plain.first()});
+        for (const auto &name : {"messageReplyPreview", "messageAttachments", "messageBotKeyboard", "forwardedMessages"}) QTRY_COMPARE(named(name).size(), 0);
+        if (qEnvironmentVariableIsSet("VKM_FORWARD_TIMELINE_SCREENSHOT")) {
+            window->resize(780, 560);
+            auto sample = plain.first().toMap(); sample["text"] = "Пересылаю планы на выходные";
+            sample["raw"] = QVariantMap{{"fwd_messages", QVariantList{
+                QVariantMap{{"text", "Встречаемся в субботу утром."}, {"date", 1794258000}},
+                QVariantMap{{"text", "Принесу фотографии и список идей."}, {"date", 1794258300}}
+            }}};
+            messenger.messages()->reconcile({sample});
+            QTRY_COMPARE(named("forwardedMessageCard").size(), 2);
+            for (bool dark : {false, true}) {
+                messenger.setDarkTheme(dark); QTest::qWait(60);
+                QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_FORWARD_TIMELINE_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
+            }
+        }
+        QVERIFY(network.requests.isEmpty()); QCOMPARE(warnings.count(), 0);
+    }
+
+    void forwardedMessagesExpandInBatchesAndGateMedia()
+    {
+        TokenNetwork network;
+        QImage image(32, 24, QImage::Format_RGB32); image.fill(QColor("#6a99cf"));
+        QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+        QVariantList messages;
+        for (int i = 0; i < 100; ++i) {
+            network.responses[QString("forward-%1").arg(i)] = {png};
+            messages.append(QVariantMap{{"text", QString("Пересланный текст %1 <b>без HTML</b>").arg(i + 1)}, {"date", 1794258000},
+                {"attachments", QVariantList{QVariantMap{{"type", "photo"}, {"photo", QVariantMap{{"sizes", QVariantList{QVariantMap{{"url", QString("https://assets.test/forward-%1").arg(i)}, {"width", 320}, {"height", 240}}}}}}}}}});
+        }
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QQmlEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFileInfo(QStringLiteral(NATIVE_QML_PATH)).dir().filePath("ForwardedMessages.qml")));
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({{"messages", messages}, {"messageKey", "first"}, {"loadImages", false}, {"viewportHeight", 300}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto view = qobject_cast<QQuickItem *>(object.get()); QVERIFY(view);
+        QQuickWindow window; window.resize(400, 700); view->setParentItem(window.contentItem()); view->setWidth(352); view->setX(24); view->setY(24); window.show();
+        const auto named = [view](const QString &name) {
+            QList<QQuickItem *> result;
+            const auto collect = [&](auto &&self, QQuickItem *item) -> void { if (item->objectName() == name) result.append(item); for (auto child : item->childItems()) self(self, child); };
+            collect(collect, view); return result;
+        };
+        QTRY_COMPARE(named("forwardedMessageCard").size(), 3); QVERIFY(network.requests.isEmpty());
+        QTRY_VERIFY(named("forwardedMessageAttachments").first()->height() > 200);
+        const auto photo = named("attachmentOpen").first(); const auto firstCard = named("forwardedMessageCard").first();
+        QVERIFY(photo->mapToItem(firstCard, QPointF(0, photo->height())).y() <= firstCard->height());
+        const auto secondCard = named("forwardedMessageCard")[1];
+        QVERIFY(secondCard->y() >= firstCard->y() + firstCard->height());
+        auto more = named("showMoreForwarded").first(); auto collapse = named("collapseForwarded").first();
+        QCOMPARE(view->property("remaining").toInt(), 97);
+        QVERIFY(named("forwardedMessageText").first()->property("text").toString().contains("<b>без HTML</b>"));
+        QCOMPARE(named("forwardedMessageText").first()->property("textFormat").toInt(), 0); // TextEdit.PlainText
+        view->setProperty("loadImages", true); QTRY_VERIFY(network.requests.size() > 0); QVERIFY(network.requests.size() <= 3);
+        const auto initialRequests = network.requests.size();
+        QVERIFY(QMetaObject::invokeMethod(more, "clicked")); QTRY_COMPARE(named("forwardedMessageCard").size(), 8);
+        QTest::qWait(30); QCOMPARE(network.requests.size(), initialRequests);
+        view->setProperty("viewportTop", -1500); QTRY_VERIFY(network.requests.size() > initialRequests); QVERIFY(network.requests.size() <= 8);
+        // Updating the same message must retain the expanded state.
+        auto edited = messages.first().toMap(); edited["text"] = "Исправленный текст"; messages[0] = edited;
+        view->setProperty("messages", messages); QCOMPARE(named("forwardedMessageCard").size(), 8);
+        QVERIFY(QMetaObject::invokeMethod(collapse, "clicked")); QTRY_COMPARE(named("forwardedMessageCard").size(), 3);
+        QVERIFY(more->hasActiveFocus());
+        QVERIFY(QMetaObject::invokeMethod(more, "clicked")); QTRY_COMPARE(named("forwardedMessageCard").size(), 8);
+        view->setProperty("messageKey", "second"); QTRY_COMPARE(named("forwardedMessageCard").size(), 3);
+        QVERIFY(QMetaObject::invokeMethod(more, "clicked")); QTRY_COMPARE(named("forwardedMessageCard").size(), 8);
+        view->setProperty("loadImages", false); view->setProperty("viewportTop", 0);
+        view->setProperty("messages", QVariantList{QVariantMap{{"text", "Планы на выходные: встречаемся в субботу утром."}, {"date", 1794258000}}, QVariantMap{{"text", "Принесу фотографии и небольшой список идей."}, {"date", 1794258300}}});
+        QTRY_COMPARE(named("forwardedMessageCard").size(), 2); QVERIFY(!more->isVisible()); QVERIFY(!collapse->isVisible());
+        QCOMPARE(named("forwardedMessageAttachments").size(), 0);
+        for (bool dark : {false, true}) {
+            messenger.setDarkTheme(dark); window.setColor(dark ? QColor("#222222") : QColor("white")); QTest::qWait(30);
+            if (qEnvironmentVariableIsSet("VKM_FORWARDED_SCREENSHOT")) QVERIFY(window.grabWindow().save(qEnvironmentVariable("VKM_FORWARDED_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
+        }
+        QCOMPARE(warnings.count(), 0);
+    }
+
     void photoViewerUsesLargestAvailableSize()
     {
         Messenger messenger; messenger.startDemo();
@@ -2419,10 +2630,73 @@ private slots:
         auto status = window->findChild<QQuickItem *>("transferStatus"); QVERIFY(status);
         QTRY_VERIFY(status->isVisible()); QTest::qWait(100);
         QCOMPARE(status->property("text").toString(), error);
-        QVERIFY(status->height() > 30); QVERIFY(!status->property("truncated").toBool());
+        QVERIFY(status->property("lineCount").toInt() > 1); QVERIFY(!status->property("truncated").toBool());
         QVERIFY(status->height() >= status->property("contentHeight").toReal() - 1);
         QVERIFY(status->mapToScene(QPointF(status->width(), 0)).x() < window->width());
         if (qEnvironmentVariableIsSet("VKM_UPLOAD_ERROR_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_UPLOAD_ERROR_SCREENSHOT")));
+    }
+
+    void transferCardsSeparateDirectionsAndShowProgress()
+    {
+        QTemporaryDir files;
+        QFile input(files.filePath("Отчёт.txt")); QVERIFY(input.open(QIODevice::WriteOnly)); input.write("fixture payload"); input.close();
+        TokenNetwork network;
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window); window->resize(780, 560);
+        auto uploads = window->findChild<QQuickItem *>("uploadTransferCard"); QVERIFY(uploads);
+        auto downloads = window->findChild<QQuickItem *>("downloadTransferCard"); QVERIFY(downloads);
+        auto uploadBar = uploads->findChild<QQuickItem *>("uploadTransferProgress"); QVERIFY(uploadBar);
+        auto downloadBar = downloads->findChild<QQuickItem *>("downloadTransferProgress"); QVERIFY(downloadBar);
+        auto uploadCancel = uploads->findChild<QObject *>("uploadTransferCancel"); QVERIFY(uploadCancel);
+        auto downloadCancel = downloads->findChild<QObject *>("downloadTransferCancel"); QVERIFY(downloadCancel);
+        auto transfers = messenger.transfers();
+        transfers->upload(QUrl::fromLocalFile(input.fileName()), "1", "doc");
+        transfers->upload(QUrl::fromLocalFile(input.fileName()), "2", "doc");
+        QTRY_VERIFY(transfers->busy()); QTRY_VERIFY(uploads->isVisible());
+        transfers->setProperty("sentBytes", 1048576); transfers->setProperty("totalBytes", 4194304); transfers->setProperty("progress", 0.25);
+        QTRY_COMPARE(uploadBar->property("value").toDouble(), 0.25); QVERIFY(!uploadBar->property("indeterminate").toBool());
+        transfers->download(QUrl("https://assets.test/large"), QUrl::fromLocalFile(files.filePath("Скачанный файл.bin")));
+        QTRY_VERIFY(downloads->isVisible()); QVERIFY(downloadBar->property("indeterminate").toBool());
+        QTRY_COMPARE(network.replies["large"].size(), 1);
+        network.replies["large"].first()->downloadProgress(5242880, 10485760);
+        QTRY_COMPARE(downloadBar->property("value").toDouble(), 0.5); QVERIFY(!downloadBar->property("indeterminate").toBool());
+        transfers->setProperty("progress", 1.0); QTRY_COMPARE(uploadBar->property("value").toDouble(), 1.0);
+        QVERIFY(!uploadBar->property("indeterminate").toBool()); // 100% is determinate while VK saves the attachment.
+        QVERIFY(QMetaObject::invokeMethod(downloadCancel, "clicked")); QTRY_VERIFY(!downloads->isVisible());
+        QVERIFY(transfers->busy()); QCOMPARE(transfers->queuedCount(), 2);
+        transfers->download(QUrl("https://assets.test/another"), QUrl::fromLocalFile(files.filePath("Другой файл.bin")));
+        QVERIFY(QMetaObject::invokeMethod(uploadCancel, "clicked")); QTRY_VERIFY(!uploads->isVisible()); QVERIFY(transfers->downloading());
+        QVERIFY(QMetaObject::invokeMethod(downloadCancel, "clicked"));
+        const QJsonObject queued{{"jobs", QJsonArray{QJsonObject{{"file", QUrl::fromLocalFile(input.fileName()).toString()}, {"peer", "1"}, {"kind", "doc"}}}}};
+        transfers->restoreState(queued);
+        transfers->setProperty("filename", "Документ с очень длинным названием для проверки переноса.txt");
+        const QString uploadError = "Сервер передачи (pu.vk.ru) вернул HTTP 403. Повторите загрузку. Подготовленный файл сохранён, выбирать его заново не нужно.";
+        transfers->setError(uploadError);
+        transfers->download(QUrl("https://assets.test/retry"), QUrl::fromLocalFile(files.filePath("missing/Документ.bin")));
+        QTRY_VERIFY(uploads->isVisible()); QTRY_VERIFY(downloads->isVisible());
+        QCOMPARE(uploads->property("error").toString(), uploadError);
+        QVERIFY(!downloads->property("error").toString().isEmpty());
+        auto copy = uploads->findChild<QQuickItem *>("uploadTransferCopyError"); QVERIFY(copy); QVERIFY(copy->isVisible());
+        const auto accessible = QAccessible::queryAccessibleInterface(copy); QVERIFY(accessible);
+        QCOMPARE(accessible->text(QAccessible::Name), QString("Скопировать ошибку передачи"));
+        auto status = uploads->findChild<QQuickItem *>("transferStatus"); QVERIFY(status);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        for (bool dark : {false, true}) {
+            messenger.setDarkTheme(dark); QTest::qWait(50);
+            QVERIFY(status->height() >= status->property("contentHeight").toReal() - 1);
+            QVERIFY(history->height() > 100);
+            if (qEnvironmentVariableIsSet("VKM_TRANSFER_CARDS_SCREENSHOT"))
+                QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_TRANSFER_CARDS_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
+        }
+        QVERIFY(QMetaObject::invokeMethod(uploads->findChild<QObject *>("uploadTransferRetry"), "clicked"));
+        QTRY_VERIFY(transfers->busy()); QVERIFY(!downloads->property("error").toString().isEmpty());
+        QVERIFY(QDir().mkpath(files.filePath("missing")));
+        QVERIFY(QMetaObject::invokeMethod(downloads->findChild<QObject *>("downloadTransferRetry"), "clicked"));
+        QTRY_VERIFY(transfers->downloading()); QVERIFY(transfers->busy());
+        transfers->cancel(); transfers->cancelDownload(); QCOMPARE(warnings.count(), 0);
     }
 
     void photoViewerRecoversFromNetworkAndDecodeErrors()

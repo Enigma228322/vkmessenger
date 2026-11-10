@@ -54,7 +54,10 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
                      &app, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("VK", "Main");
-    if (!engine.rootObjects().isEmpty()) deepLinks.setWindow(qobject_cast<QWindow *>(engine.rootObjects().first()));
+    if (!engine.rootObjects().isEmpty()) {
+        auto window = qobject_cast<QWindow *>(engine.rootObjects().first());
+        deepLinks.setWindow(window); messenger.notifications()->setWindow(window);
+    }
     bool tokenEntryAvailable = false;
     if (selfCheck && !engine.rootObjects().isEmpty()) {
         auto field = engine.rootObjects().first()->findChild<QObject *>("accessTokenInput");

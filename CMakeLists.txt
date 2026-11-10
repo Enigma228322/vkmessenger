@@ -21,10 +21,12 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 20)
     qt_add_plugin(vkm-webp STATIC CLASS_NAME VkmWebPPlugin src/platform/WebPPlugin.mm)
     target_link_libraries(vkm-webp PRIVATE Qt6::Gui "-framework ImageIO" "-framework CoreGraphics")
-    add_library(vkm-platform STATIC src/platform/Preferences.mm)
-    target_link_libraries(vkm-platform PRIVATE "-framework AppKit")
+    add_library(vkm-platform STATIC src/platform/Preferences.mm src/platform/NotificationBackend.mm)
+    set_source_files_properties(src/platform/NotificationBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(vkm-platform PRIVATE Qt6::Core "-framework AppKit" "-framework UserNotifications")
 else()
-    add_library(vkm-platform STATIC src/platform/Preferences.cpp)
+    add_library(vkm-platform STATIC src/platform/Preferences.cpp src/platform/NotificationBackend.cpp)
+    target_link_libraries(vkm-platform PRIVATE Qt6::Core)
 endif()
 target_include_directories(vkm-platform PUBLIC src)
 if(APPLE)
@@ -32,6 +34,7 @@ if(APPLE)
 endif()
 
 qt_add_executable(VK MACOSX_BUNDLE
+    src/platform/DesktopNotifications.cpp src/platform/DesktopNotifications.h
     src/main.cpp src/Messenger.cpp src/Messenger.h src/media/AvatarImage.cpp src/media/AvatarImage.h src/models/ConversationFilterModel.cpp src/models/ConversationFilterModel.h
     src/OAuth.cpp src/OAuth.h src/Keychain.cpp src/Keychain.h
     src/LongPoll.cpp src/LongPoll.h src/LongPollEvent.h src/Form.h
@@ -40,7 +43,7 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
 qt_add_qml_module(VK
     URI VK VERSION 1.0
-    QML_FILES qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
+    QML_FILES qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src src/media "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VK PRIVATE vkm-platform Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Multimedia opus rlottie::rlottie ZLIB::ZLIB)
@@ -112,6 +115,7 @@ if(BUILD_TESTING)
     add_test(NAME protocol-tests COMMAND protocol-tests)
 
     qt_add_executable(messenger-tests tests/MessengerTest.cpp src/media/AvatarImage.cpp src/media/AvatarImage.h src/models/ConversationFilterModel.cpp src/models/ConversationFilterModel.h
+        src/platform/DesktopNotifications.cpp src/platform/DesktopNotifications.h
         src/Messenger.cpp src/Messenger.h src/OAuth.cpp src/OAuth.h src/LongPoll.cpp src/LongPoll.h
         src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
         src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)

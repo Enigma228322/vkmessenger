@@ -62,7 +62,7 @@ static QString mediaDirectory(const QString &overridePath)
     return storage.isEmpty() ? QString() : storage + "/media";
 }
 
-Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QString &storagePath, bool persistentSession)
+Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QString &storagePath, bool persistentSession, std::unique_ptr<NotificationBackend> notificationBackend)
     : QObject(parent), m_store(storageDirectory(storagePath)), m_actions(this), m_profileActions(this), m_folders(this),
       m_media(mediaDirectory(storagePath), nullptr, network),
       m_oauth(this, network), m_longPoll(this, network),
@@ -71,6 +71,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
       }, this, network), m_api(network)
 {
     m_persistentSession = persistentSession;
+    m_notifications = new DesktopNotifications(*this, notificationBackend ? std::move(notificationBackend) : persistentSession ? createNotificationBackend() : nullptr, this);
     m_profileTimer.setSingleShot(true); m_profileTimer.setInterval(16);
     connect(&m_profileTimer, &QTimer::timeout, this, [this] {
         if (m_loading && !m_fetchingHistory) { m_profileTimer.start(); return; }
@@ -88,7 +89,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
         }
     });
     m_reconnectTimer.start();
-    connect(&m_transfers, &Transfers::changed, this, [this] {
+    connect(&m_transfers, &Transfers::stateChanged, this, [this] {
         if (m_restoringTransfers || m_demo || m_account.isEmpty()) return;
         const auto state = m_transfers.savedState();
         if (m_drafts.value("__transfers") == state) return;
@@ -348,6 +349,7 @@ void Messenger::logout()
     m_presenceRevision.clear(); m_eventRevision = 0; m_syncBlocked = false; m_publicMessages = false;
     m_messagesAccessError.clear();
     m_rawConversations.clear(); m_peers.clear(); m_profileFetchedAt.clear(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop(); m_histories.clear(); m_presentedMessages.clear(); m_recentViews.clear(); m_recentHistoryPeers.clear(); m_localIdentities.clear();
+    m_notificationHighWater.clear(); m_notificationBaseline = false;
     m_lastCmid.clear(); m_inRead.clear(); m_readPending.clear(); m_older.clear(); m_newer.clear();
     m_contentDirty.clear(); m_contentRevision.clear();
     m_verifiedRanges.clear();
@@ -744,6 +746,7 @@ void Messenger::fetchPublicConversations(const std::shared_ptr<DiffTransaction> 
 
 void Messenger::applyDiff(const DiffTransaction &transaction)
 {
+    QHash<QString, QJsonObject> notices;
     if (transaction.full) {
         m_rawConversations.clear();
         m_histories.clear(); m_presentedMessages.clear(); m_recentViews.clear(); m_recentHistoryPeers.clear(); m_older.clear(); m_newer.clear();
@@ -767,11 +770,16 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
             if (conversation.isEmpty()) continue;
             const auto peer = id(conversation.value("peer").toObject().value("id"));
             if (peer == "0") continue;
+            const auto previousNotice = m_notificationHighWater.value(peer);
             m_rawConversations[peer] = info;
             ++m_contentRevision[peer];
             m_lastCmid[peer] = conversation.value("last_conversation_message_id").toInteger();
             m_inRead[peer] = conversation.value("in_read_cmid").toInteger();
             m_outRead[peer] = conversation.value("out_read_cmid").toInteger();
+            m_notificationHighWater[peer] = qMax(previousNotice, m_lastCmid.value(peer));
+            const auto push = conversation.value("push_settings").toObject();
+            const bool muted = push.value("disabled_forever").toBool() || push.value("disabled_until").toInteger() == -1
+                || push.value("disabled_until").toInteger() > QDateTime::currentSecsSinceEpoch();
             auto &history = m_histories[peer];
             if (info.value("invalidate").toBool() || info.value("invalidate").toInt() == 1) { history.clear(); m_verifiedRanges.remove(peer); }
             for (const auto &flagValue : info.value("cmids_flags").toArray()) {
@@ -797,11 +805,22 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
                 const auto object = message.toObject();
                 const auto cmid = object.value("conversation_message_id").toInteger();
                 if (cmid > 0) history[cmid] = object;
+                m_notificationHighWater[peer] = qMax(m_notificationHighWater.value(peer), cmid);
+                if (m_notificationBaseline && !muted && conversation.value("unread_count").toInt() > 0 && cmid > previousNotice && cmid > m_inRead.value(peer)
+                    && object.value("out").toInt() == 0 && !object.contains("action") && !object.value("deleted").toBool() && object.value("deleted").toInt() != 1
+                    && !object.value("is_silent").toBool() && object.value("is_silent").toInt() != 1 && !object.value("silent").toBool() && object.value("silent").toInt() != 1
+                    && cmid > notices.value(peer).value("conversation_message_id").toInteger()) notices[peer] = object;
             }
             if (peer == m_peer) m_historyDirty = true;
         }
     }
     rebuildConversations();
+    m_notificationBaseline = true;
+    for (auto it = notices.cbegin(); it != notices.cend(); ++it) {
+        auto title = peerProfile(it.key()).value("title").toString();
+        if (title.isEmpty()) title = "Новое сообщение";
+        emit notificationRequested(m_account, it.key(), id(it.value().value("conversation_message_id")), title, preview(it.value()));
+    }
     m_folders.conversationsChanged();
     reconcileOutbox();
     trimInactiveHistories();
@@ -1147,6 +1166,12 @@ void Messenger::jumpToEnd()
     if (m_demo || (!hasNewer() && !m_messages.rows.isEmpty() && m_historyError.isEmpty())) { emit scrollToEnd(); return; }
     if (m_offline && !m_loading) { m_histories[m_peer].clear(); m_verifiedRanges.remove(m_peer); readCachedHistory(m_peer); return; }
     if (!m_loading) fetchHistory(false, true);
+}
+
+bool Messenger::openNotification(const QString &account, const QString &peer, const QString &cmid)
+{
+    if (!m_connected || m_demo || account.isEmpty() || account != m_account || peer.toLongLong() == 0 || cmid.toLongLong() <= 0) return false;
+    openMessage(peer, cmid); return true;
 }
 
 QString Messenger::latestMessageCmid() const

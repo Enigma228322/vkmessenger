@@ -9,14 +9,16 @@
 
 class TransferReply : public QNetworkReply {
 public:
-    TransferReply(const QNetworkRequest &request, QByteArray data, QObject *parent, NetworkError failure = NoError, int status = 200)
+    TransferReply(const QNetworkRequest &request, QByteArray data, QObject *parent, NetworkError failure = NoError, int status = 200, bool hold = false)
         : QNetworkReply(parent), m_data(std::move(data)) {
         setRequest(request); setUrl(request.url()); open(QIODevice::ReadOnly | QIODevice::Unbuffered);
-        QTimer::singleShot(0, this, [this, failure, status] {
-            setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
-            if (failure != NoError) setError(failure, "https://pu.upload.test/private?hash=secret-upload-signature");
-            setFinished(true); emit readyRead(); emit finished();
-        });
+        if (!hold) QTimer::singleShot(0, this, [this, failure, status] { finish(failure, status); });
+    }
+    void finish(NetworkError failure = NoError, int status = 200) {
+        if (isFinished()) return;
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
+        if (failure != NoError) setError(failure, "https://pu.upload.test/private?hash=secret-upload-signature");
+        setFinished(true); emit readyRead(); emit finished();
     }
     void abort() override { if (!isFinished()) { setError(OperationCanceledError, "cancelled"); setFinished(true); emit finished(); } }
     qint64 bytesAvailable() const override { return m_data.size() - m_offset + QIODevice::bytesAvailable(); }
@@ -37,18 +39,76 @@ public:
     QList<QByteArray> responses;
     QList<QNetworkReply::NetworkError> failures;
     QList<int> statuses;
+    bool hold = false;
+    QList<QPointer<TransferReply>> replies;
 protected:
     QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *outgoing) override {
         urls.append(request.url()); body = outgoing ? outgoing->readAll() : QByteArray();
         requests.append(request);
-        return new TransferReply(request, responses.isEmpty() ? response : responses.takeFirst(), this,
-            failures.isEmpty() ? QNetworkReply::NoError : failures.takeFirst(), statuses.isEmpty() ? 200 : statuses.takeFirst());
+        auto reply = new TransferReply(request, responses.isEmpty() ? response : responses.takeFirst(), this,
+            failures.isEmpty() ? QNetworkReply::NoError : failures.takeFirst(), statuses.isEmpty() ? 200 : statuses.takeFirst(), hold);
+        replies.append(reply); return reply;
     }
 };
 
 class TransfersTest : public QObject {
     Q_OBJECT
 private slots:
+    void progressBurstsDoNotPublishMetadataOrDurableState()
+    {
+        QTemporaryDir directory; QFile file(directory.filePath("upload.txt"));
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write("payload"); file.close();
+        TransferNetwork network; network.hold = true;
+        Transfers transfers([](const QString &, Form, Transfers::Result result) { result(QJsonObject{{"upload_url", "https://upload.test/file"}}, {}); }, nullptr, &network);
+        QSignalSpy durable(&transfers, &Transfers::stateChanged);
+        transfers.upload(QUrl::fromLocalFile(file.fileName()), "77", "doc");
+        transfers.upload(QUrl::fromLocalFile(file.fileName()), "88", "doc");
+        QCOMPARE(durable.count(), 2); QCOMPARE(transfers.queuedCount(), 2);
+        transfers.download(QUrl("https://cdn.test/file"), QUrl::fromLocalFile(directory.filePath("download.bin")));
+        QCOMPARE(durable.count(), 2); QCOMPARE(network.replies.size(), 2);
+        QSignalSpy metadata(&transfers, &Transfers::changed), pending(&transfers, &Transfers::pendingChanged);
+        QSignalSpy uploading(&transfers, &Transfers::progressChanged), downloading(&transfers, &Transfers::downloadProgressChanged);
+        durable.clear();
+        for (int i = 1; i <= 1000; ++i) { network.replies[0]->uploadProgress(i, 1000); network.replies[1]->downloadProgress(i, 1000); }
+        QCOMPARE(uploading.count(), 0); QCOMPARE(downloading.count(), 0);
+        QTRY_COMPARE(uploading.count(), 1); QTRY_COMPARE(downloading.count(), 1);
+        QCOMPARE(transfers.property("progress").toDouble(), 1.0); QCOMPARE(transfers.downloadProgress(), 1.0);
+        QCOMPARE(transfers.property("sentBytes").toLongLong(), 1000); QCOMPARE(transfers.property("receivedBytes").toLongLong(), 1000);
+        QCOMPARE(metadata.count(), 0); QCOMPARE(durable.count(), 0); QCOMPARE(pending.count(), 0);
+        network.replies[0]->uploadProgress(1000, 1000); QTest::qWait(70); QCOMPARE(uploading.count(), 1);
+        network.replies[1]->downloadProgress(1500, -1); QCOMPARE(transfers.downloadProgress(), 0.0);
+        transfers.cancelDownload(); const auto notifications = downloading.count();
+        QVERIFY(transfers.busy()); QCOMPARE(transfers.queuedCount(), 2); QCOMPARE(durable.count(), 0);
+        QTest::qWait(70); QCOMPARE(downloading.count(), notifications);
+        network.replies[0]->uploadProgress(100, 1000); transfers.cancel(); const auto stopped = uploading.count();
+        QTest::qWait(70); QCOMPARE(uploading.count(), stopped); QCOMPARE(transfers.queuedCount(), 0); QCOMPARE(durable.count(), 1);
+        QVERIFY(!QFile::exists(directory.filePath("download.bin")));
+    }
+
+    void uploadAndDownloadErrorsAndRetriesStayIndependent()
+    {
+        QTemporaryDir directory; QFile file(directory.filePath("upload.txt"));
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write("payload"); file.close();
+        TransferNetwork network; network.hold = true;
+        Transfers transfers([](const QString &, Form, Transfers::Result result) { result(QJsonObject{{"upload_url", "https://upload.test/file"}}, {}); }, nullptr, &network);
+        transfers.upload(QUrl::fromLocalFile(file.fileName()), "77", "doc");
+        network.replies[0]->finish(QNetworkReply::ContentAccessDenied, 403);
+        QVERIFY(transfers.uploadCanRetry()); const auto uploadError = transfers.property("uploadError").toString(); QVERIFY(uploadError.contains("403"));
+        const auto destination = directory.filePath("download.bin");
+        { QFile original(destination); QVERIFY(original.open(QIODevice::WriteOnly)); original.write("original"); }
+        transfers.download(QUrl("https://cdn.test/file?secret=private"), QUrl::fromLocalFile(destination));
+        QCOMPARE(transfers.property("uploadError").toString(), uploadError);
+        network.replies[1]->finish(QNetworkReply::NoError, 500);
+        QVERIFY(transfers.property("downloadCanRetry").toBool()); QVERIFY(transfers.property("downloadError").toString().contains("500"));
+        QVERIFY(!transfers.property("downloadError").toString().contains("private"));
+        { QFile original(destination); QVERIFY(original.open(QIODevice::ReadOnly)); QCOMPARE(original.readAll(), "original"); }
+        transfers.retryUpload(); QVERIFY(transfers.busy()); QVERIFY(transfers.property("downloadCanRetry").toBool()); QCOMPARE(network.replies.size(), 3);
+        transfers.retryDownload(); QVERIFY(transfers.downloading()); QVERIFY(transfers.busy()); QCOMPARE(network.replies.size(), 4);
+        transfers.cancel(); QVERIFY(transfers.downloading());
+        transfers.cancelDownload(); QVERIFY(!transfers.canRetry()); QVERIFY(transfers.error().isEmpty());
+        QVERIFY(transfers.savedState().value("jobs").toArray().isEmpty());
+    }
+
     void uploadRefreshesAddressAndReplaysStagedFileOnce()
     {
         QTemporaryDir directory;

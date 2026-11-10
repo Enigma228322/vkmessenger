@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import VK 1.0 as Native
 
-ColumnLayout {
+Column {
     id: root
     property var attachments: []
     property bool animationsEnabled: true
@@ -67,8 +67,9 @@ ColumnLayout {
         return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0")
     }
     PhotoGrid {
-        Layout.fillWidth: true
-        Layout.preferredHeight: implicitHeight
+        id: photoGrid
+        width: root.width
+        height: photoGrid.implicitHeight
         visible: root.photos.length > 0
         photos: root.photos; siblings: root.attachments
         loadImages: root.loadImages; cornerColor: root.photoBackground
@@ -78,7 +79,7 @@ ColumnLayout {
         delegate: ColumnLayout {
             id: row
             required property var modelData
-            Layout.fillWidth: true
+            width: root.width
             spacing: 4
             Loader {
                 Layout.fillWidth: true
