@@ -41,6 +41,10 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h
     src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
     src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
+# On Linux the binary "VK" must not collide with the QML module's VK directory.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(VK PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+endif()
 qt_add_qml_module(VK
     URI VK VERSION 1.0
     QML_FILES qml/CacheDialog.qml qml/LinkPreview.qml qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
