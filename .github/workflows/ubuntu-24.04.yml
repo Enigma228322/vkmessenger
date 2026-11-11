@@ -22,7 +22,7 @@ jobs:
         timeout-minutes: 8
         run: |
           exec > >(tee "$RUNNER_TEMP/ubuntu-dependencies.log") 2>&1
-          # Avoid the runner's Azure mirrorlist, which may fail DNS resolution.
+          # Use an Ubuntu mirror reachable from this build network; APT verifies signatures.
           sudo python3 - <<'PYAPT'
           from pathlib import Path
           import re
@@ -30,7 +30,7 @@ jobs:
               if p.suffix in ('.sources', '.list') and p.is_file():
                   s = p.read_text()
                   s = re.sub(r'mirror\+file:[^\s]+', 'https://archive.ubuntu.com/ubuntu', s)
-                  s = s.replace('http://azure.archive.ubuntu.com/ubuntu', 'https://archive.ubuntu.com/ubuntu')
+                  s = re.sub(r'https?://(?:azure\.archive|archive|security)\.ubuntu\.com/ubuntu', 'https://ftp.fau.de/ubuntu', s)
                   p.write_text(s)
           PYAPT
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
@@ -65,7 +65,8 @@ jobs:
       - name: Test installation in clean Ubuntu
         run: |
           docker run --rm -v "$PWD/dist/ubuntu:/packages:ro" ubuntu:24.04 sh -ec '
-            apt-get update
+            sed -i -E "s|https?://(archive|security).ubuntu.com/ubuntu/?|https://ftp.fau.de/ubuntu/|g" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update
             DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
             QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
             QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software xvfb-run -a /opt/vkm/bin/VK --self-check
