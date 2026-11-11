@@ -5,6 +5,10 @@ on:
   push:
     branches: ["codex/ubuntu-24.04-build"]
 
+concurrency:
+  group: ubuntu-package-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -15,9 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Install build and desktop dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+          exec > >(tee "$RUNNER_TEMP/ubuntu-dependencies.log") 2>&1
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
             zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
             libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
@@ -26,6 +32,7 @@ jobs:
             desktop-file-utils fonts-dejavu-core nodejs gnome-keyring
       - name: Install official Qt SDK
         run: |
+          exec > >(tee "$RUNNER_TEMP/ubuntu-qt.log") 2>&1
           python3 -m venv "$RUNNER_TEMP/aqt"
           "$RUNNER_TEMP/aqt/bin/pip" install 'aqtinstall==3.2.1'
           "$RUNNER_TEMP/aqt/bin/aqt" install-qt linux desktop 6.11.1 linux_gcc_64 -O "$RUNNER_TEMP/Qt" \
@@ -33,7 +40,8 @@ jobs:
             -m qtmultimedia qtimageformats qtshadertools
           echo "QT_ROOT_DIR=$RUNNER_TEMP/Qt/6.11.1/gcc_64" >> "$GITHUB_ENV"
       - name: Build, test and package
-        run: sh scripts/build-ubuntu-package.sh
+        run: |
+          sh scripts/build-ubuntu-package.sh 2>&1 | tee "$RUNNER_TEMP/ubuntu-build.log"
       - name: Test secure session storage
         run: |
           export XDG_DATA_HOME="$(mktemp -d)"
@@ -51,6 +59,15 @@ jobs:
             QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
             QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software xvfb-run -a /opt/vkm/bin/VK --self-check
           '
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ubuntu-diagnostics
+          path: |
+            ${{ runner.temp }}/ubuntu-*.log
+            build-linux/Testing/Temporary/LastTest.log
+          retention-days: 7
       - name: Upload Ubuntu package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
