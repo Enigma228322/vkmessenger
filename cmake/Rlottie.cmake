@@ -17,6 +17,11 @@ target_include_directories(rlottie INTERFACE "$<BUILD_INTERFACE:${rlottie_SOURCE
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(rlottie PRIVATE -Wno-error)
 endif()
+# This pinned renderer uses std::numeric_limits without including <limits>.
+# libstdc++ 13 no longer supplies that header through its other includes.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(rlottie PRIVATE -include limits)
+endif()
 if(APPLE)
     # Upstream's NEON helpers call 32-bit ARM assembly, unavailable on macOS
     # arm64. Select the portable implementation and omit those helper objects.
