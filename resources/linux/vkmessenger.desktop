@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=VK Messenger
+Name[ru]=VK Мессенджер
+Comment=VK messages, photos and files
+Comment[ru]=Сообщения, фотографии и файлы ВКонтакте
+Exec=/opt/vkm/bin/VK %u
+Icon=vkmessenger
+Terminal=false
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/vkm;
+StartupWMClass=VK

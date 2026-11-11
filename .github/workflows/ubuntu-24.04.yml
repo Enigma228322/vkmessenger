@@ -1,0 +1,60 @@
+name: Ubuntu 24.04 package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/ubuntu-24.04-build"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install build and desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+            zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
+            libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libpulse0 libasound2t64 libfontconfig1 \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgl1-mesa-dri xvfb xauth dbus-x11 \
+            desktop-file-utils fonts-dejavu-core nodejs gnome-keyring
+      - name: Install official Qt SDK
+        run: |
+          python3 -m venv "$RUNNER_TEMP/aqt"
+          "$RUNNER_TEMP/aqt/bin/pip" install 'aqtinstall==3.2.1'
+          "$RUNNER_TEMP/aqt/bin/aqt" install-qt linux desktop 6.11.1 linux_gcc_64 -O "$RUNNER_TEMP/Qt" \
+            --archives qtbase qtdeclarative qtsvg qttools qttranslations \
+            -m qtmultimedia qtimageformats qtshadertools
+          echo "QT_ROOT_DIR=$RUNNER_TEMP/Qt/6.11.1/gcc_64" >> "$GITHUB_ENV"
+      - name: Build, test and package
+        run: sh scripts/build-ubuntu-package.sh
+      - name: Test secure session storage
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- sh -ec '
+            printf "vkm-test-only-password" | gnome-keyring-daemon --unlock --components=secrets
+            VKM_ISOLATED_SECRET_SERVICE=1 build-linux/linux-keychain-tests
+          '
+      - name: Test installation in clean Ubuntu
+        run: |
+          docker run --rm -v "$PWD/dist/ubuntu:/packages:ro" ubuntu:24.04 sh -ec '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
+            QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
+            QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software xvfb-run -a /opt/vkm/bin/VK --self-check
+          '
+      - name: Upload Ubuntu package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ubuntu-24.04-amd64
+          path: dist/ubuntu/*
+          if-no-files-found: error
+          retention-days: 14

@@ -55,6 +55,51 @@ void Keychain::clear()
     SecItemDelete(q);
     CFRelease(q);
 }
+#elif defined(Q_OS_LINUX)
+#pragma push_macro("signals")
+#undef signals
+#include <libsecret/secret.h>
+#pragma pop_macro("signals")
+#ifndef VKM_KEYCHAIN_SERVICE_ID
+#define VKM_KEYCHAIN_SERVICE_ID "dev.reforged.messenger"
+#endif
+
+namespace {
+const SecretSchema sessionSchema = {
+    "dev.reforged.messenger", SECRET_SCHEMA_NONE,
+    {{"service", SECRET_SCHEMA_ATTRIBUTE_STRING}, {"account", SECRET_SCHEMA_ATTRIBUTE_STRING}, {nullptr, SECRET_SCHEMA_ATTRIBUTE_STRING}}
+};
+}
+
+QByteArray Keychain::read()
+{
+    GError *error = nullptr;
+    gchar *password = secret_password_lookup_sync(&sessionSchema, nullptr, &error,
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+    if (error) { g_error_free(error); return {}; }
+    const QByteArray result = password ? QByteArray::fromBase64(password) : QByteArray();
+    if (password) secret_password_free(password);
+    return result;
+}
+
+bool Keychain::write(const QByteArray &value)
+{
+    GError *error = nullptr;
+    const auto encoded = value.toBase64();
+    const bool stored = secret_password_store_sync(&sessionSchema, SECRET_COLLECTION_DEFAULT,
+        "VK Messenger session", encoded.constData(), nullptr, &error,
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+    if (error) g_error_free(error);
+    return stored;
+}
+
+void Keychain::clear()
+{
+    GError *error = nullptr;
+    secret_password_clear_sync(&sessionSchema, nullptr, &error,
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+    if (error) g_error_free(error);
+}
 #else
 QByteArray Keychain::read() { return {}; }
 bool Keychain::write(const QByteArray &) { return false; }

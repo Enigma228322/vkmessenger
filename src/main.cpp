@@ -1,5 +1,7 @@
 #include "Messenger.h"
 #include <QGuiApplication>
+#include <QIcon>
+#include <QFileInfo>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QQmlContext>
@@ -24,6 +26,11 @@ int main(int argc, char *argv[])
     app.setOrganizationDomain("reforged.dev");
     app.setApplicationName("VK");
     app.setApplicationDisplayName("VK — VK Мессенджер");
+#ifndef Q_OS_MACOS
+    app.setWindowIcon(QIcon(QStringLiteral(":/icons/VK.png")));
+#endif
+    // macOS loads the Dock icon from CFBundleIconFile. Setting it through Qt's
+    // Cocoa plugin can crash inside QImage::toCGImage on macOS 27.
     QQuickStyle::setStyle("Basic");
     const bool selfCheck = app.arguments().contains("--self-check");
     // Keep existing profiles discoverable under the stable organization domain.
@@ -76,14 +83,23 @@ int main(int argc, char *argv[])
             svg = !image.isNull() && image.size() == QSize(24, 24) && image.pixelColor(12, 12) == QColor("#ffcc4d");
         }
         const bool brand = app.applicationName() == "VK" && !engine.rootObjects().isEmpty() && engine.rootObjects().first()->property("title").toString() == "VK";
+        const bool appIcon = !QImage(QStringLiteral(":/icons/VK.png")).isNull();
+#ifdef Q_OS_MACOS
+        const bool bundleIcon = QFileInfo::exists(QCoreApplication::applicationDirPath() + QStringLiteral("/../Resources/VK.icns"));
+#else
+        const bool bundleIcon = true;
+#endif
         QJsonObject result{{"vkIdConfigured", messenger.loginConfigured()}, {"vkAppId", messenger.property("clientId").toString()}, {"vkRedirectUri", messenger.property("redirectUri").toString()}, {"brand", brand}, {"webp", webp}, {"svg", svg}, {"tokenEntry", tokenEntryAvailable}, {"apiInspector", messenger.apiInspectorEnabled()}, {"qml", !engine.rootObjects().isEmpty()}, {"sqlite", QSqlDatabase::isDriverAvailable("QSQLITE")}, {"gif", QImageReader::supportedImageFormats().contains("gif")},
             {"voiceOggOpus", OggOpusWriter::selfCheck()}, {"demoMessages", messenger.messages()->rowCount()}};
+        result.insert("appIcon", appIcon);
+        result.insert("bundleIcon", bundleIcon);
+        result.insert("platform", app.platformName());
         for (const auto &arg : app.arguments()) if (arg.startsWith("--screenshot=")) {
             auto window = engine.rootObjects().isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(engine.rootObjects().first());
             result.insert("screenshot", window && window->grabWindow().save(arg.mid(13)));
         }
         QTextStream(stdout) << QJsonDocument(result).toJson(QJsonDocument::Compact) << Qt::endl;
-        app.exit(brand && webp && svg && tokenEntryAvailable && result.value("qml").toBool() && result.value("sqlite").toBool() && result.value("gif").toBool() && result.value("voiceOggOpus").toBool() ? 0 : 2);
+        app.exit(brand && appIcon && bundleIcon && webp && svg && tokenEntryAvailable && result.value("qml").toBool() && result.value("sqlite").toBool() && result.value("gif").toBool() && result.value("voiceOggOpus").toBool() ? 0 : 2);
     });
     return app.exec();
 }
