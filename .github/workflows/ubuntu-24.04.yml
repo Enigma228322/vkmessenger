@@ -38,8 +38,11 @@ jobs:
           dpkg --print-architecture
           ls -lh /var/lib/apt/lists
           apt-cache policy build-essential cmake libsecret-1-dev
-          apt-config dump
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+          sudo apt-cache -o Dir::Cache::pkgcache="" -o Dir::Cache::srcpkgcache="" policy build-essential cmake libsecret-1-dev
+          cat /etc/apt/sources.list.d/ubuntu.sources
+          apt-get indextargets --format '$(FILENAME)'
+          head -25 /var/lib/apt/lists/ftp.fau.de_ubuntu_dists_noble_main_binary-amd64_Packages
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dir::Cache::pkgcache="" -o Dir::Cache::srcpkgcache="" install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
             zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
             libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
@@ -51,7 +54,7 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/ubuntu-qt.log") 2>&1
           python3 -m venv "$RUNNER_TEMP/aqt"
           "$RUNNER_TEMP/aqt/bin/pip" install 'aqtinstall==3.2.1'
-          "$RUNNER_TEMP/aqt/bin/aqt" install-qt linux desktop 6.11.1 linux_gcc_64 -O "$RUNNER_TEMP/Qt" \
+          "$RUNNER_TEMP/aqt/bin/aqt" -c cmake/aqt-linux.ini install-qt linux desktop 6.11.1 linux_gcc_64 -O "$RUNNER_TEMP/Qt" \
             --archives qtbase qtdeclarative qtsvg qttools qttranslations \
             -m qtmultimedia qtimageformats qtshadertools
           echo "QT_ROOT_DIR=$RUNNER_TEMP/Qt/6.11.1/gcc_64" >> "$GITHUB_ENV"
