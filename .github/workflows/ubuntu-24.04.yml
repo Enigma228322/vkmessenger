@@ -22,27 +22,18 @@ jobs:
         timeout-minutes: 8
         run: |
           exec > >(tee "$RUNNER_TEMP/ubuntu-dependencies.log") 2>&1
-          # Use an Ubuntu mirror reachable from this build network; APT verifies signatures.
-          sudo python3 - <<'PYAPT'
-          from pathlib import Path
-          import re
-          for p in Path('/etc/apt').rglob('*'):
-              if p.suffix in ('.sources', '.list') and p.is_file():
-                  s = p.read_text()
-                  s = re.sub(r'mirror\+file:[^\s]+', 'https://archive.ubuntu.com/ubuntu', s)
-                  s = re.sub(r'https?://(?:azure\.archive|archive|security)\.ubuntu\.com/ubuntu', 'https://ftp.fau.de/ubuntu', s)
-                  p.write_text(s)
-          PYAPT
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          uname -a
-          dpkg --print-architecture
-          ls -lh /var/lib/apt/lists
-          apt-cache policy build-essential cmake libsecret-1-dev
-          sudo apt-cache -o Dir::Cache::pkgcache="" -o Dir::Cache::srcpkgcache="" policy build-essential cmake libsecret-1-dev
-          cat /etc/apt/sources.list.d/ubuntu.sources
-          apt-get indextargets --format '$(FILENAME)'
-          head -25 /var/lib/apt/lists/ftp.fau.de_ubuntu_dists_noble_main_binary-amd64_Packages
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dir::Cache::pkgcache="" -o Dir::Cache::srcpkgcache="" install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+          # Use one explicit source for both update and install. The image may
+          # regenerate ubuntu.sources independently while the job is running.
+          cat > "$RUNNER_TEMP/vkm-ubuntu.sources" <<'APT'
+          Types: deb
+          URIs: https://ftp.fau.de/ubuntu/
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          APT
+          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/vkm-ubuntu.sources" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
             zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
             libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
