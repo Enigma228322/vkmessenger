@@ -22,6 +22,17 @@ jobs:
         timeout-minutes: 8
         run: |
           exec > >(tee "$RUNNER_TEMP/ubuntu-dependencies.log") 2>&1
+          # Avoid the runner's Azure mirrorlist, which may fail DNS resolution.
+          sudo python3 - <<'PYAPT'
+          from pathlib import Path
+          import re
+          for p in Path('/etc/apt').rglob('*'):
+              if p.suffix in ('.sources', '.list') and p.is_file():
+                  s = p.read_text()
+                  s = re.sub(r'mirror\+file:[^\s]+', 'https://archive.ubuntu.com/ubuntu', s)
+                  s = s.replace('http://azure.archive.ubuntu.com/ubuntu', 'https://archive.ubuntu.com/ubuntu')
+                  p.write_text(s)
+          PYAPT
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
             zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
