@@ -87,7 +87,12 @@ jobs:
             -v /etc/ssl/certs/ca-certificates.crt:/tmp/vkm-build-ca.pem:ro ubuntu:24.04 sh -ec '
             sed -i -E "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#https://ftp.fau.de/ubuntu/#g" /etc/apt/sources.list.d/ubuntu.sources
             apt-get -o Acquire::https::CAInfo=/tmp/vkm-build-ca.pem -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update
-            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/vkm-build-ca.pem install -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/vkm-build-ca.pem install --no-install-recommends -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
+            ffmpeg_plugin=$(find /opt/vkm -type f -name libffmpegmediaplugin.so -print -quit)
+            test -n "$ffmpeg_plugin"
+            ldd "$ffmpeg_plugin" > /tmp/vkm-multimedia-libs.txt
+            cat /tmp/vkm-multimedia-libs.txt
+            if grep -q "not found" /tmp/vkm-multimedia-libs.txt; then exit 1; fi
             QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
             QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software xvfb-run -a /opt/vkm/bin/VK --self-check
           '
