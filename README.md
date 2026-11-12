@@ -144,7 +144,7 @@ sh scripts/package-macos-release.sh dist/VK-0.2.0-macOS-arm64.zip
 
 ## Ubuntu 24.04 LTS (Intel/AMD x86_64)
 
-Собрана и проверена версия `.deb` с Qt 6.11.1 и QML-модулями. [Успешная проверка Ubuntu](https://github.com/Enigma228322/vkmessenger/actions/runs/43187979859). Сборка и проверки выполняются workflow `.github/workflows/ubuntu-24.04.yml`; готовый пакет и SHA-256 появляются в артефакте `ubuntu-24.04-amd64` после успешного завершения.
+Собрана и проверена версия `.deb` с Qt 6.11.1 и QML-модулями. [Успешная проверка Ubuntu](https://github.com/Enigma228322/vkmessenger/actions/runs/43190265270). Сборка и проверки выполняются workflow `.github/workflows/ubuntu-24.04.yml`; готовый пакет и SHA-256 появляются в артефакте `ubuntu-24.04-amd64` после успешного завершения.
 
 Установка скачанного пакета:
 
