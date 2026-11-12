@@ -14,6 +14,7 @@ option(VKM_DEPLOY_LINUX_RUNTIME "Bundle Qt and its QML/runtime dependencies" ON)
 if(VKM_DEPLOY_LINUX_RUNTIME)
     qt_generate_deploy_qml_app_script(TARGET VK OUTPUT_SCRIPT linux_deploy_script
         NO_TRANSLATIONS
+        INCLUDE_PLUGINS Qt6::QOffscreenIntegrationPlugin Qt6::QXcbIntegrationPlugin Qt6::QWaylandIntegrationPlugin
         EXCLUDE_PLUGINS Qt6::QODBCDriverPlugin Qt6::QPSQLDriverPlugin Qt6::QMYSQLDriverPlugin)
     install(SCRIPT "${linux_deploy_script}")
 endif()

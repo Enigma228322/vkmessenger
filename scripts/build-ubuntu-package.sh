@@ -12,6 +12,8 @@ test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
 
 cmake -S "$project_dir" -B "$linux_build" -G Ninja \
+    -DCMAKE_CXX_COMPILER_LAUNCHER="${VKM_COMPILER_LAUNCHER:-}" \
+    -DCMAKE_C_COMPILER_LAUNCHER="${VKM_COMPILER_LAUNCHER:-}" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$qt_prefix" \
     -DCMAKE_INSTALL_PREFIX=/opt/vkm -DCMAKE_INSTALL_LIBDIR=lib \
     -DVKM_ENABLE_API_INSPECTOR=OFF -DBUILD_TESTING=ON

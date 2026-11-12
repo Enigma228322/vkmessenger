@@ -16,6 +16,11 @@ jobs:
   package:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      VKM_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Install build and desktop dependencies
@@ -33,7 +38,7 @@ jobs:
           APT
           apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/vkm-ubuntu.sources" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::https::Timeout=30)
           sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+          sudo apt-get "${apt_options[@]}" install -y ccache build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
             zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
             libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
@@ -49,10 +54,22 @@ jobs:
             --archives qtbase qtdeclarative qtsvg qttools qttranslations qtwayland icu \
             -m qtmultimedia qtimageformats qtshadertools
           echo "QT_ROOT_DIR=$RUNNER_TEMP/Qt/6.11.1/gcc_64" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ubuntu24-qt6111-ccache-v1-${{ github.sha }}
+          restore-keys: ubuntu24-qt6111-ccache-v1-
       - name: Build, test and package
         run: |
           set -o pipefail
           sh scripts/build-ubuntu-package.sh 2>&1 | tee "$RUNNER_TEMP/ubuntu-build.log"
+      - name: Save compiler cache
+        if: always() && !cancelled()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ubuntu24-qt6111-ccache-v1-${{ github.sha }}
       - name: Test secure session storage
         run: |
           exec > >(tee "$RUNNER_TEMP/ubuntu-keychain.log") 2>&1
