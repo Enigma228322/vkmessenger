@@ -30,6 +30,8 @@ trap 'rm -rf "$package_stage"' EXIT HUP INT TERM
 dpkg-deb -x "$deb_file" "$package_stage"
 package_executable="$package_stage/opt/vkm/bin/VK"
 test -x "$package_executable"
+test ! -d "$package_stage/usr/lib"
+test ! -d "$package_stage/opt/vkm/include"
 test -f "$package_stage/usr/share/applications/vkmessenger.desktop"
 test -f "$package_stage/usr/share/icons/hicolor/1024x1024/apps/vkmessenger.png"
 
