@@ -84,7 +84,7 @@ jobs:
         run: |
           exec > >(tee "$RUNNER_TEMP/ubuntu-install.log") 2>&1
           docker run --rm -v "$PWD/dist/ubuntu:/packages:ro" ubuntu:24.04 sh -ec '
-            sed -i -E "s|https?://(archive|security).ubuntu.com/ubuntu/?|https://ftp.fau.de/ubuntu/|g" /etc/apt/sources.list.d/ubuntu.sources
+            sed -i -E "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#https://ftp.fau.de/ubuntu/#g" /etc/apt/sources.list.d/ubuntu.sources
             apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update
             DEBIAN_FRONTEND=noninteractive apt-get install -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
             QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
