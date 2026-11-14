@@ -1,0 +1,38 @@
+include(GNUInstallDirs)
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "/opt/vkm" CACHE PATH "Install prefix" FORCE)
+endif()
+install(TARGETS VK RUNTIME DESTINATION bin COMPONENT Runtime)
+install(FILES "${PROJECT_SOURCE_DIR}/resources/linux/vkmessenger.desktop" DESTINATION /usr/share/applications COMPONENT Runtime)
+install(FILES "${PROJECT_SOURCE_DIR}/resources/icons/VK.png" DESTINATION /usr/share/icons/hicolor/1024x1024/apps RENAME vkmessenger.png COMPONENT Runtime)
+install(FILES "${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" DESTINATION share/licenses/vkmessenger COMPONENT Runtime)
+install(FILES "${VKM_OPUS_COPYING}" DESTINATION share/licenses/vkmessenger/opus COMPONENT Runtime)
+install(FILES "${rlottie_SOURCE_DIR}/COPYING" DESTINATION share/licenses/vkmessenger/rlottie COMPONENT Runtime)
+install(DIRECTORY "${rlottie_SOURCE_DIR}/licenses/" DESTINATION share/licenses/vkmessenger/rlottie COMPONENT Runtime)
+
+option(VKM_DEPLOY_LINUX_RUNTIME "Bundle Qt and its QML/runtime dependencies" ON)
+if(VKM_DEPLOY_LINUX_RUNTIME)
+    qt_generate_deploy_qml_app_script(TARGET VK OUTPUT_SCRIPT linux_deploy_script
+        NO_TRANSLATIONS
+        INCLUDE_PLUGINS qoffscreen qxcb qwayland
+        EXCLUDE_PLUGINS qsqlodbc qsqlpsql qsqlmysql)
+    install(SCRIPT "${linux_deploy_script}" COMPONENT Runtime)
+endif()
+
+# Package only application rules; vendored libraries also define development
+# installs (headers, .a, pkg-config/CMake files) that must not enter this .deb.
+set(CPACK_INSTALL_CMAKE_PROJECTS "${CMAKE_BINARY_DIR};${PROJECT_NAME};Runtime;/")
+set(CPACK_GENERATOR DEB)
+set(CPACK_PACKAGE_NAME vkmessenger)
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_CONTACT "https://github.com/Enigma228322/vkmessenger/issues")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "VK Messenger desktop client")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/vkm")
+set(CPACK_SET_DESTDIR ON)
+set(CPACK_DEBIAN_PACKAGE_SECTION net)
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/Enigma228322/vkmessenger")
+set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE amd64)
+set(CPACK_PACKAGE_FILE_NAME "vkmessenger_${PROJECT_VERSION}_ubuntu24.04_amd64")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.39), libstdc++6 (>= 13), ca-certificates, zlib1g, libzstd1, libbz2-1.0, libdrm2, libsecret-1-0, libglib2.0-0t64, libdbus-1-3, libssl3t64, libgssapi-krb5-2, libfontconfig1, libfreetype6, libegl1, libgl1, libopengl0, libx11-6, libx11-xcb1, libxext6, libxfixes3, libxi6, libxrender1, libxrandr2, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-shape0, libxcb-xfixes0, libxcb-randr0, libxcb-sync1, libxcb-xkb1, libxcb-render0, libxcb-shm0, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libpulse0, libasound2t64, libsqlite3-0, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "gnome-keyring, xdg-utils, fonts-dejavu-core")
+include(CPack)

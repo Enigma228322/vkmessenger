@@ -254,7 +254,7 @@ void Messenger::acceptSession(QJsonObject session)
     m_error.clear();
     m_status = "Подключение к сообщениям…";
     if (m_persistentSession && !Keychain::write(QJsonDocument(session).toJson(QJsonDocument::Compact)))
-        m_error = "Не удалось сохранить сессию в Keychain. После закрытия понадобится повторный вход.";
+        m_error = "Не удалось сохранить сессию в системном хранилище паролей. После закрытия понадобится повторный вход.";
     if (session.value("auth_type").toString() == "oauth_api" && session.value("expires_at").toInteger() > 0) {
         const auto remaining = session.value("expires_at").toInteger() - QDateTime::currentSecsSinceEpoch();
         m_refresh.start(int(std::clamp<qint64>(remaining, 1, 86400)) * 1000);

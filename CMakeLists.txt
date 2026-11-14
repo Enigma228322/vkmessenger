@@ -41,12 +41,31 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h
     src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
     src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
+# On Linux the binary "VK" must not collide with the QML module's VK directory.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(VK PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+endif()
 qt_add_qml_module(VK
     URI VK VERSION 1.0
     QML_FILES qml/CacheDialog.qml qml/LinkPreview.qml qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src src/media "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(VK PRIVATE vkm-platform Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Multimedia opus rlottie::rlottie ZLIB::ZLIB)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    target_link_libraries(VK PRIVATE PkgConfig::LIBSECRET)
+endif()
+qt_add_resources(VK app_icon PREFIX "/icons" BASE "resources/icons" FILES resources/icons/VK.png)
+if(APPLE)
+    target_sources(VK PRIVATE resources/icons/VK.icns)
+    set_source_files_properties(resources/icons/VK.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    set_target_properties(VK PROPERTIES MACOSX_BUNDLE_ICON_FILE "VK.icns")
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(cmake/LinuxPackaging.cmake)
+endif()
 if(APPLE AND VKM_OPUS_LIBRARY MATCHES "\\.dylib$")
     add_custom_command(TARGET VK POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:VK>/Contents/Frameworks"
@@ -91,6 +110,14 @@ if(BUILD_TESTING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     endif()
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        qt_add_executable(linux-keychain-tests tests/LinuxKeychainTest.cpp src/Keychain.cpp)
+        target_include_directories(linux-keychain-tests PRIVATE src)
+        target_compile_definitions(linux-keychain-tests PRIVATE VKM_KEYCHAIN_SERVICE_ID="dev.reforged.messenger.tests")
+        target_link_libraries(linux-keychain-tests PRIVATE Qt6::Test PkgConfig::LIBSECRET)
+        add_test(NAME linux-keychain-tests COMMAND linux-keychain-tests)
+        set_tests_properties(linux-keychain-tests PROPERTIES TIMEOUT 30)
+    endif()
     find_program(VKM_NODE_EXECUTABLE node)
     if(VKM_NODE_EXECUTABLE)
         add_test(NAME photo-layout-tests COMMAND "${VKM_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/PhotoLayoutTest.cjs")

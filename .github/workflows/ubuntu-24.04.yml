@@ -1,0 +1,116 @@
+name: Ubuntu 24.04 package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/ubuntu-24.04-build"]
+
+concurrency:
+  group: ubuntu-package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/build-ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      VKM_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install build and desktop dependencies
+        timeout-minutes: 8
+        run: |
+          exec > >(tee "$RUNNER_TEMP/ubuntu-dependencies.log") 2>&1
+          # Use one explicit source for both update and install. The image may
+          # regenerate ubuntu.sources independently while the job is running.
+          cat > "$RUNNER_TEMP/vkm-ubuntu.sources" <<'APT'
+          Types: deb
+          URIs: https://ftp.fau.de/ubuntu/
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          APT
+          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/vkm-ubuntu.sources" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y ccache build-essential cmake ninja-build pkg-config python3-venv p7zip-full patchelf \
+            zlib1g-dev libsecret-1-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
+            libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-sync1 libxcb-xkb1 libxcb-util1 libx11-xcb1 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libpulse0 libasound2t64 libfontconfig1 \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libgl1-mesa-dri xvfb xauth dbus-x11 \
+            desktop-file-utils fonts-dejavu-core nodejs gnome-keyring
+      - name: Install official Qt SDK
+        run: |
+          exec > >(tee "$RUNNER_TEMP/ubuntu-qt.log") 2>&1
+          python3 -m venv "$RUNNER_TEMP/aqt"
+          "$RUNNER_TEMP/aqt/bin/pip" install 'aqtinstall==3.2.1'
+          "$RUNNER_TEMP/aqt/bin/aqt" -c cmake/aqt-linux.ini install-qt linux desktop 6.11.1 linux_gcc_64 -O "$RUNNER_TEMP/Qt" \
+            --archives qtbase qtdeclarative qtsvg qttools qttranslations qtwayland icu \
+            -m qtmultimedia qtimageformats qtshadertools
+          echo "QT_ROOT_DIR=$RUNNER_TEMP/Qt/6.11.1/gcc_64" >> "$GITHUB_ENV"
+      - name: Restore compiler cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ubuntu24-qt6111-ccache-v1-${{ github.sha }}
+          restore-keys: ubuntu24-qt6111-ccache-v1-
+      - name: Build, test and package
+        run: |
+          set -o pipefail
+          sh scripts/build-ubuntu-package.sh 2>&1 | tee "$RUNNER_TEMP/ubuntu-build.log"
+      - name: Save compiler cache
+        if: always() && !cancelled()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ubuntu24-qt6111-ccache-v1-${{ github.sha }}
+      - name: Test secure session storage
+        run: |
+          exec > >(tee "$RUNNER_TEMP/ubuntu-keychain.log") 2>&1
+          export XDG_DATA_HOME="$(mktemp -d)"
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- sh -ec '
+            printf "vkm-test-only-password" | gnome-keyring-daemon --unlock --components=secrets
+            VKM_ISOLATED_SECRET_SERVICE=1 build-linux/linux-keychain-tests
+          '
+      - name: Test installation in clean Ubuntu
+        run: |
+          exec > >(tee "$RUNNER_TEMP/ubuntu-install.log") 2>&1
+          docker run --rm -v "$PWD/dist/ubuntu:/packages:ro" \
+            -v /etc/ssl/certs/ca-certificates.crt:/tmp/vkm-build-ca.pem:ro ubuntu:24.04 sh -ec '
+            sed -i -E "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#https://ftp.fau.de/ubuntu/#g" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::https::CAInfo=/tmp/vkm-build-ca.pem -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/vkm-build-ca.pem install --no-install-recommends -y /packages/*.deb xvfb xauth fonts-dejavu-core libgl1-mesa-dri
+            ffmpeg_plugin=$(find /opt/vkm -type f -name libffmpegmediaplugin.so -print -quit)
+            test -n "$ffmpeg_plugin"
+            ldd "$ffmpeg_plugin" > /tmp/vkm-multimedia-libs.txt
+            cat /tmp/vkm-multimedia-libs.txt
+            if grep -q "not found" /tmp/vkm-multimedia-libs.txt; then exit 1; fi
+            QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software /opt/vkm/bin/VK --self-check
+            QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software xvfb-run -a /opt/vkm/bin/VK --self-check
+          '
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ubuntu-diagnostics
+          path: |
+            ${{ runner.temp }}/ubuntu-*.log
+            build-linux/Testing/Temporary/LastTest.log
+          retention-days: 7
+      - name: Upload Ubuntu package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ubuntu-24.04-amd64
+          path: |
+            dist/ubuntu/*.deb
+            dist/ubuntu/*.deb.sha256
+          if-no-files-found: error
+          retention-days: 14
