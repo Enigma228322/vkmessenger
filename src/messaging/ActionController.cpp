@@ -81,20 +81,58 @@ void ActionController::editMessage(const QString &peer, const QString &cmid, con
 
 void ActionController::deleteMessages(const QString &peer, const QStringList &cmids, bool forEveryone)
 {
-    if (cmids.isEmpty()) return;
-    invoke("messages.delete", {{"peer_id", peer}, {"cmids", cmids.join(',')}, {"delete_for_all", forEveryone ? "1" : "0"}}, [this, peer, cmids, forEveryone](const QJsonValue &value) {
-        bool partial = false;
-        const auto items = value.toArray();
-        for (const auto &v : items) {
-            const auto item = v.toObject();
-            if (item.value("response").toInt() != 1 || item.contains("error")) { partial = true; continue; }
-            if (!forEveryone && item.value("conversation_message_id").toInteger() > 0)
-                m_messenger->m_restorable.append(QVariantMap{{"peer_id", peer}, {"cmid", identifier(item.value("conversation_message_id"))}, {"group_id", m_messenger->groupId()}});
+    QStringList requested;
+    QSet<QString> requestedIds;
+    QHash<QString, QString> globalIds;
+    const auto history = m_messenger->m_histories.value(peer);
+    for (auto it = history.begin(); it != history.end(); ++it) {
+        const auto global = identifier(it.value().value("id"));
+        if (global.toLongLong() > 0) globalIds.insert(global, QString::number(it.key()));
+    }
+    for (const auto &cmid : cmids) {
+        bool valid = false; const auto id = cmid.toLongLong(&valid);
+        if (!valid || id <= 0) continue;
+        const auto normalized = QString::number(id);
+        if (requestedIds.contains(normalized)) continue;
+        requested.append(normalized); requestedIds.insert(normalized);
+    }
+    if (requested.isEmpty()) return;
+    if (!m_busy && m_messenger->connected() && !m_messenger->demo() && !m_messenger->offline())
+        emit messagesDeletionStarted(peer, requested);
+    // Capture global-ID mappings before synchronization can remove the messages.
+    invoke("messages.delete", {{"peer_id", peer}, {"cmids", requested.join(',')}, {"delete_for_all", forEveryone ? "1" : "0"}},
+        [this, peer, requested, requestedIds, globalIds, forEveryone](const QJsonValue &value) {
+        QSet<QString> confirmed;
+        const auto succeeded = [](const QJsonValue &result) { return result.isDouble() && result.toDouble() == 1.0; };
+        if (succeeded(value)) confirmed = requestedIds;
+        else if (value.isArray()) {
+            for (const auto &v : value.toArray()) {
+                const auto item = v.toObject();
+                if (!succeeded(item.value("response")) || item.contains("error")) continue;
+                if (item.contains("peer_id") && identifier(item.value("peer_id")) != peer) continue;
+                auto cmid = identifier(item.value("conversation_message_id"));
+                if (cmid.isEmpty()) cmid = globalIds.value(identifier(item.value("message_id")));
+                if (requestedIds.contains(cmid)) confirmed.insert(cmid);
+            }
+        } else if (value.isObject()) {
+            const auto byId = value.toObject();
+            for (auto it = byId.begin(); it != byId.end(); ++it) {
+                if (!succeeded(it.value())) continue;
+                const auto cmid = globalIds.value(it.key(), it.key());
+                if (requestedIds.contains(cmid)) confirmed.insert(cmid);
+            }
         }
-        const auto byId = value.toObject();
-        for (auto it = byId.begin(); it != byId.end(); ++it) if (it.value().toInt() != 1) partial = true;
-        if (items.isEmpty() && byId.isEmpty() && !value.isDouble()) partial = true;
-        if (partial) m_error = "Часть сообщений не удалось удалить. Переписка будет обновлена.";
+        QStringList deleted;
+        for (const auto &cmid : requested) if (confirmed.contains(cmid)) {
+            deleted.append(cmid);
+            if (!forEveryone) {
+                const QVariantMap restore{{"peer_id", peer}, {"cmid", cmid}, {"group_id", m_messenger->groupId()}};
+                if (!m_messenger->m_restorable.contains(restore)) m_messenger->m_restorable.append(restore);
+            }
+        }
+        while (m_messenger->m_restorable.size() > 100) m_messenger->m_restorable.removeFirst();
+        if (deleted.size() != requested.size()) m_error = "Часть сообщений не удалось удалить. Переписка будет обновлена.";
+        if (!deleted.isEmpty()) emit messagesDeleted(peer, deleted);
         emit m_messenger->changed();
     });
 }

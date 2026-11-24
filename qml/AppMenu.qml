@@ -21,5 +21,8 @@ Menu {
             NumberAnimation { property: "scale"; to: 0.98; duration: messenger.reduceMotion ? 0 : 140; easing.type: Easing.OutCubic }
         }
     }
-    background: MenuSurface { color: menu.palette.window; borderColor: menu.palette.mid }
+    background: MenuSurface {
+        color: Qt.rgba(menu.palette.window.r, menu.palette.window.g, menu.palette.window.b, 0.96)
+        borderColor: messenger.darkTheme ? "#587f9ebb" : "#c9ffffff"
+    }
 }

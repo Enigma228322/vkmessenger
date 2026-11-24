@@ -19,12 +19,12 @@ Dialog {
         id: button
         property bool primary: false
         implicitHeight: 40; leftPadding: 14; rightPadding: 14
-        contentItem: Text { text: button.text; font: button.font; color: !button.enabled ? design.muted : button.primary ? "white" : design.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-        background: Rectangle { radius: 8; color: !button.enabled ? design.secondary : button.primary ? design.accent : button.hovered ? design.hover : design.secondary; border.color: button.visualFocus ? design.accent : "transparent" }
+        contentItem: Text { text: button.text; font: button.font; color: !button.enabled ? design.muted : button.primary ? design.dark ? "#102238" : "white" : design.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+        background: GlassSurface { radius: 12; color: !button.enabled ? design.glassInput : button.primary ? design.accent : button.hovered ? design.glassSelection : design.glassInput; borderColor: button.visualFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
     }
     Binding { target: messenger.folderChoices; property: "query"; value: sheet.visible && sheet.editing ? sheet.appliedQuery : "" }
     onClosed: { searchDelay.stop(); messenger.folderChoices.savedPeers = []; appliedQuery = ""; chosen = []; folderId = "" }
-    background: Rectangle { radius: 18; color: sheet.palette.window; border.color: design.divider }
+    background: GlassSurface { radius: 24; color: Qt.rgba(design.surface.r, design.surface.g, design.surface.b, 0.96); borderColor: design.glassBorder; highlightColor: design.glassHighlight; dark: design.dark; elevated: true }
     header: Label { text: sheet.title; color: design.ink; font.pixelSize: 18; font.weight: Font.DemiBold; leftPadding: 24; rightPadding: 24; topPadding: 20; bottomPadding: 8 }
     footer: Item {
         implicitHeight: 68
@@ -92,7 +92,7 @@ Dialog {
         TextField {
             id: nameField; objectName: "folderName"; visible: sheet.editing; Layout.fillWidth: true; implicitHeight: 40
             maximumLength: 16; placeholderText: "Название папки"; Accessible.name: placeholderText; color: design.ink; placeholderTextColor: design.muted
-            background: Rectangle { radius: 10; color: design.secondary; border.color: nameField.activeFocus ? design.accent : design.divider }
+            background: GlassSurface { radius: 12; color: design.glassInput; borderColor: nameField.activeFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
             onAccepted: if (!inputMethodComposing) query.forceActiveFocus()
         }
         TextField {
@@ -101,7 +101,7 @@ Dialog {
             visible: sheet.editing; Layout.fillWidth: true; implicitHeight: 40
             placeholderText: "Найти переписку"; Accessible.name: placeholderText
             leftPadding: 36; rightPadding: 38; color: design.ink; placeholderTextColor: design.muted
-            background: Rectangle { radius: 10; color: design.secondary; border.color: query.activeFocus ? design.accent : design.divider }
+            background: GlassSurface { radius: 12; color: design.glassInput; borderColor: query.activeFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
             onTextChanged: { searchDelay.stop(); if (!text.length) sheet.applySearch(); else if (!inputMethodComposing) searchDelay.restart() }
             onInputMethodComposingChanged: { searchDelay.stop(); if (!inputMethodComposing) searchDelay.restart() }
             onAccepted: sheet.focusResults(1)
@@ -147,7 +147,7 @@ Dialog {
                 Accessible.name: String((sheet.editing ? modelData.title : modelData.name) || "Переписка") + (highlighted ? ", выбрано" : "")
                 Accessible.selected: highlighted
                 Accessible.onPressAction: sheet.activate(modelData)
-                background: Rectangle { radius: 10; color: row.highlighted ? design.selected : row.hovered ? design.hover : "transparent"; border.color: row.ListView.isCurrentItem && results.activeFocus ? design.accent : "transparent" }
+                background: Rectangle { radius: 14; color: row.highlighted ? design.glassSelection : row.hovered ? Qt.rgba(design.accent.r, design.accent.g, design.accent.b, 0.10) : "transparent"; border.color: row.ListView.isCurrentItem && results.activeFocus ? design.accent : row.highlighted ? design.glassBorder : "transparent" }
                 contentItem: RowLayout {
                     spacing: 10
                     Rectangle {

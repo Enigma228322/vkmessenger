@@ -24,13 +24,14 @@ class VkApiClient : public QObject {
     Q_OBJECT
 public:
     using Callback = std::function<void(const ApiResult &)>;
+    using Condition = std::function<bool()>;
     explicit VkApiClient(QNetworkAccessManager *network = nullptr, QObject *parent = nullptr);
     ~VkApiClient() override { cancel(); }
     void setToken(const QString &token) { m_token = token; }
-    void request(const QString &method, Form params, Callback callback);
+    void request(const QString &method, Form params, Callback callback, Condition stillNeeded = {});
     void cancel();
 private:
-    struct Request { QString method; Form params; Callback callback; int retries = 0; int priority = 1; };
+    struct Request { QString method; Form params; Callback callback; Condition stillNeeded; int retries = 0; int priority = 1; };
     void pump();
     void perform(Request request);
     QNetworkAccessManager m_defaultNetwork;

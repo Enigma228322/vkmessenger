@@ -8,6 +8,7 @@
 #include "api/VkApiClient.h"
 #include "messaging/ActionController.h"
 #include "messaging/FolderController.h"
+#include "messaging/AutoReplyController.h"
 #include "media/MediaCache.h"
 #include "media/VoiceRecorder.h"
 #include "models/ConversationFilterModel.h"
@@ -139,12 +140,15 @@ private:
 class Messenger : public QObject {
     Q_OBJECT
     friend class ActionController;
+    friend class AutoReplyController;
     friend class FolderController;
+    friend class MessengerTest;
     Q_PROPERTY(ItemModel *conversations READ conversations CONSTANT)
     Q_PROPERTY(ConversationFilterModel *filteredConversations READ filteredConversations CONSTANT)
     Q_PROPERTY(ConversationPickerModel *conversationChoices READ conversationChoices CONSTANT)
     Q_PROPERTY(FolderPeerModel *folderChoices READ folderChoices CONSTANT)
     Q_PROPERTY(ItemModel *messages READ messages CONSTANT)
+    Q_PROPERTY(AutoReplyController *autoReply READ autoReply CONSTANT)
     Q_PROPERTY(DesktopNotifications *notifications READ notifications CONSTANT)
     Q_PROPERTY(bool connected READ connected NOTIFY changed)
     Q_PROPERTY(bool demo READ demo NOTIFY changed)
@@ -159,6 +163,8 @@ class Messenger : public QObject {
     Q_PROPERTY(QString redirectUri MEMBER m_redirectUri NOTIFY changed)
     Q_PROPERTY(QString scope MEMBER m_scope NOTIFY changed)
     Q_PROPERTY(QString peerActivity READ peerActivity NOTIFY changed)
+    Q_PROPERTY(QString peerPresence READ peerPresence NOTIFY changed)
+    Q_PROPERTY(bool peerTyping READ peerTyping NOTIFY changed)
     Q_PROPERTY(int unreadCount MEMBER m_unreadCount NOTIFY changed)
     Q_PROPERTY(bool hasOlder READ hasOlder NOTIFY changed)
     Q_PROPERTY(bool hasNewer READ hasNewer NOTIFY changed)
@@ -210,6 +216,7 @@ public:
     bool authorizing() const { return m_authorizing; }
     QString title() const { return m_title; }
     QString selectedPeer() const { return m_peer; }
+    AutoReplyController *autoReply() { return &m_autoReply; }
     DesktopNotifications *notifications() const { return m_notifications; }
     QString notificationAccount() const { return m_account; }
     bool openNotification(const QString &account, const QString &peer, const QString &cmid);
@@ -238,6 +245,8 @@ public:
     Q_INVOKABLE bool isPerson(const QString &id) const { bool ok; auto value = id.toLongLong(&ok); return ok && value > 0 && value < 2000000000; }
     QString draftText() const { return m_drafts.value(m_peer).value("text").toString(); }
     QString peerActivity() const;
+    QString peerPresence() const;
+    bool peerTyping() const { return m_activity.value(m_peer).typing; }
     bool hasOlder() const { return m_older.value(m_peer, true); }
     bool hasNewer() const { return m_newer.value(m_peer, false); }
     QVariantList methods() const;
@@ -307,7 +316,7 @@ signals:
     void cacheStatsChanged();
 private:
     using Callback = std::function<void(const QJsonValue &, const QString &)>;
-    void api(const QString &method, Form parameters, Callback callback);
+    void api(const QString &method, Form parameters, Callback callback, VkApiClient::Condition stillNeeded = {});
     void fetchConversations();
     void fetchHistory(bool older = false, bool latest = false, qint64 anchor = -1, bool keepWindow = false);
     void fetchPublicHistory(const QString &peer, qint64 cmid, int offset, Callback callback);
@@ -366,6 +375,7 @@ private:
     LongPoll m_longPoll;
     Transfers m_transfers;
     VkApiClient m_api;
+    AutoReplyController m_autoReply;
     QTimer m_sync, m_refresh, m_activityExpiry, m_toastTimer;
     ItemModel m_conversations, m_messages;
     ConversationFilterModel m_filteredConversations{&m_conversations, &m_folders, this};
@@ -406,7 +416,7 @@ private:
     QHash<QString, QVariantList> m_demoHistory;
     QString m_clientId, m_redirectUri, m_scope, m_token, m_peer, m_title, m_error, m_status;
     QString m_pendingPeer, m_pendingText, m_pendingRandomId;
-    struct Activity { QString text; qint64 expires; };
+    struct Activity { QString text; qint64 expires = 0; bool typing = false; };
     QHash<QString, Activity> m_activity;
     QHash<QString, bool> m_online;
     QHash<QString, quint64> m_presenceRevision;

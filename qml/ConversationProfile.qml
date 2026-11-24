@@ -44,7 +44,7 @@ Drawer {
     interactive: false
     focus: true
     closePolicy: Popup.CloseOnEscape
-    background: Rectangle { color: theme.surface; border.color: theme.divider; radius: 12 }
+    background: GlassSurface { color: Qt.rgba(theme.surface.r, theme.surface.g, theme.surface.b, 0.95); borderColor: theme.glassBorder; highlightColor: theme.glassHighlight; dark: theme.dark; radius: 24; elevated: !panel.docked }
     enter: Transition { NumberAnimation { property: "position"; to: 1; duration: client.reduceMotion ? 0 : theme.panelDuration; easing.type: Easing.OutCubic } }
     exit: Transition { NumberAnimation { property: "position"; to: 0; duration: client.reduceMotion ? 0 : theme.motionDuration; easing.type: Easing.OutCubic } }
     function present(focusItem) {
@@ -128,12 +128,23 @@ Drawer {
         property string iconKind: ""
         Layout.fillWidth: true
         implicitHeight: 70
-        contentItem: Column {
-            spacing: 6
-            ActionIcon { anchors.horizontalCenter: parent.horizontalCenter; kind: tile.iconKind; stroke: theme.accent; width: 24; height: 24 }
-            Text { anchors.horizontalCenter: parent.horizontalCenter; text: tile.text; color: theme.accent; font.pixelSize: 14 }
+        padding: 4
+        contentItem: Item {
+            Column {
+                anchors.centerIn: parent
+                width: parent.width
+                spacing: 6
+                ActionIcon { anchors.horizontalCenter: parent.horizontalCenter; kind: tile.iconKind; stroke: theme.accent; width: 24; height: 24 }
+                Text {
+                    width: parent.width
+                    text: tile.text; textFormat: Text.PlainText
+                    color: theme.accent; font.pixelSize: 14
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                }
+            }
         }
-        background: Rectangle { radius: 12; color: tile.down || tile.hovered ? theme.divider : theme.secondary; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
+        background: GlassSurface { radius: 16; color: tile.down || tile.hovered ? theme.glassSelection : theme.glassInput; borderColor: tile.visualFocus ? theme.accent : theme.glassBorder; highlightColor: theme.glassHighlight; elevated: false; dark: theme.dark; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
     }
     component InfoRow: ItemDelegate {
         id: infoRow
@@ -147,7 +158,7 @@ Drawer {
             Text { text: infoRow.text; textFormat: Text.PlainText; color: theme.accent; font.pixelSize: 16; Layout.fillWidth: true; elide: Text.ElideMiddle }
             ActionIcon { visible: infoRow.copyable; kind: "copy"; stroke: theme.accent; width: 22; height: 22 }
         }
-        background: Rectangle { color: infoRow.hovered ? theme.secondary : "transparent"; radius: 8; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
+        background: Rectangle { color: infoRow.hovered ? theme.glassSelection : "transparent"; radius: 12; border.color: infoRow.visualFocus ? theme.accent : "transparent"; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
     }
 
     AppMenu {
@@ -229,6 +240,7 @@ Drawer {
                 RowLayout {
                     Layout.fillWidth: true; Layout.margins: 20
                     spacing: 6
+                    uniformCellSizes: true
                     Tile { objectName: "personWriteButton"; visible: panel.person; iconKind: "chat"; text: "Написать"; onClicked: panel.writeRequested(panel.peer, panel.displayTitle) }
                     Tile { iconKind: "search"; text: "Поиск"; Accessible.name: "Поиск в переписке"; onClicked: panel.actionRequested("search") }
                     Tile {
@@ -275,7 +287,7 @@ Drawer {
                                 width: visible ? implicitWidth : 0
                                 text: modelData.name + (modelData.section === 0 && panel.memberCount > 0 ? " " + panel.memberCount : "")
                                 contentItem: Text { text: parent.text; color: panel.section === modelData.section ? theme.ink : theme.muted; font.pixelSize: 15; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                background: Rectangle { radius: 10; color: panel.section === modelData.section ? theme.divider : parent.hovered ? theme.secondary : "transparent"; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
+                                background: Rectangle { radius: 12; color: panel.section === modelData.section ? theme.glassSelection : parent.hovered ? theme.glassInput : "transparent"; border.color: parent.visualFocus ? theme.accent : panel.section === modelData.section ? theme.glassBorder : "transparent"; Behavior on color { enabled: !client.reduceMotion; ColorAnimation { duration: theme.hoverDuration; easing.type: Easing.OutCubic } } }
                                 onClicked: { panel.section = modelData.section; panel.query = ""; panel.loadSection() }
                             }
                         }
@@ -318,7 +330,7 @@ Drawer {
                         background: Rectangle { radius: 8; color: parent.hovered ? theme.divider : "transparent" }
                         onClicked: { profileSearchDelay.stop(); panel.query = ""; profileSearch.clear(); profileSearch.forceActiveFocus() }
                     }
-                    background: Rectangle { color: theme.secondary; radius: 10; border.color: parent.activeFocus ? theme.accent : "transparent" }
+                    background: GlassSurface { color: theme.glassInput; radius: 12; borderColor: parent.activeFocus ? theme.accent : theme.glassBorder; highlightColor: theme.glassHighlight; elevated: false; dark: theme.dark }
                 }
                 InfoRow { Layout.leftMargin: 16; Layout.rightMargin: 16; visible: panel.chat && panel.section === 0; symbol: "+"; text: "Добавить участников"; onClicked: panel.actionRequested("add") }
                 Label { Layout.fillWidth: true; Layout.margins: 16; visible: controller.error.length > 0; text: controller.error; textFormat: Text.PlainText; color: "#ff6b6b"; wrapMode: Text.Wrap }
@@ -354,9 +366,9 @@ Drawer {
                             Accessible.onPressAction: clicked()
                             onClicked: panel.presentPerson(result.modelData, panel.returnFocus)
                             background: Rectangle {
-                                radius: 12
-                                color: member.down ? theme.pressed : member.hovered || result.current ? theme.secondary : "transparent"
-                                border.color: result.current ? theme.accent : "transparent"
+                                radius: 14
+                                color: member.down ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : member.hovered || result.current ? theme.glassSelection : "transparent"
+                                border.color: result.current ? theme.accent : member.hovered ? theme.glassBorder : "transparent"
                             }
                             contentItem: RowLayout {
                                 spacing: 14
@@ -382,7 +394,7 @@ Drawer {
                             AppMenu {
                                 id: memberMenu
                                 AppMenuItem { kind: "person"; text: "Открыть профиль"; onTriggered: panel.presentPerson(result.modelData, panel.returnFocus) }
-                                AppMenuItem { kind: "people"; text: "Управление участниками…"; visible: panel.manage && !result.modelData.is_owner; onTriggered: panel.actionRequested("members") }
+                                AppMenuItem { kind: "people"; text: "Управление участниками…"; available: panel.manage && !result.modelData.is_owner; onTriggered: panel.actionRequested("members") }
                             }
                         }
                     }

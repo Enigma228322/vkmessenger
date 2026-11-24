@@ -20,7 +20,7 @@ Dialog {
         return number.toLocaleString(Qt.locale(), 'f', unit && number < 10 ? 1 : 0) + " " + units[unit]
     }
     onOpened: messenger.refreshCacheStats()
-    background: Rectangle { radius: 16; color: theme.surface; border.color: theme.divider }
+    background: GlassSurface { radius: 24; color: Qt.rgba(theme.surface.r, theme.surface.g, theme.surface.b, 0.96); borderColor: theme.glassBorder; highlightColor: theme.glassHighlight; dark: theme.dark; elevated: true }
     header: Label {
         text: dialog.title; color: theme.ink; font.pixelSize: 19; font.weight: Font.DemiBold
         leftPadding: 20; rightPadding: 20; topPadding: 20; bottomPadding: 8
@@ -34,14 +34,16 @@ Dialog {
         implicitHeight: 40
         leftPadding: 14; rightPadding: 14
         contentItem: Text { text: button.text; color: theme.ink; opacity: button.enabled ? 1 : 0.45; font: button.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
-        background: Rectangle { radius: 8; color: button.down ? theme.pressed : button.hovered ? theme.hover : theme.surface; border.color: button.visualFocus ? theme.accent : theme.divider }
+        background: GlassSurface { radius: 12; color: button.down || button.hovered ? theme.glassSelection : theme.glassInput; borderColor: button.visualFocus ? theme.accent : theme.glassBorder; highlightColor: theme.glassHighlight; elevated: false; dark: theme.dark }
     }
-    component Section: Rectangle {
+    component Section: Item {
         default property alias content: stack.data
         Layout.fillWidth: true
         implicitHeight: stack.implicitHeight + 28
-        radius: 12; color: theme.secondary
-        data: [ColumnLayout { id: stack; x: 14; y: 14; width: parent.width - 28; spacing: 10 }]
+        data: [
+            GlassSurface { anchors.fill: parent; radius: 18; color: theme.glassInput; borderColor: theme.glassBorder; highlightColor: theme.glassHighlight; elevated: false; dark: theme.dark },
+            ColumnLayout { id: stack; x: 14; y: 14; width: parent.width - 28; spacing: 10 }
+        ]
     }
     contentItem: ScrollView {
         id: scroll
@@ -72,7 +74,7 @@ Dialog {
                     currentIndex: messenger.media.limit <= 268435456 ? 0 : messenger.media.limit <= 1073741824 ? 1 : messenger.media.limit <= 5368709120 ? 2 : 3
                     onActivated: messenger.media.limit = [268435456, 1073741824, 5368709120, 10737418240][currentIndex]
                     implicitHeight: 40
-                    background: Rectangle { radius: 8; color: theme.surface; border.color: limitPicker.visualFocus ? theme.accent : theme.divider }
+                    background: GlassSurface { radius: 12; color: theme.glassInput; borderColor: limitPicker.visualFocus ? theme.accent : theme.glassBorder; highlightColor: theme.glassHighlight; elevated: false; dark: theme.dark }
                     contentItem: Text { text: limitPicker.displayText; color: theme.ink; leftPadding: 12; rightPadding: 38; font: limitPicker.font; verticalAlignment: Text.AlignVCenter }
                     indicator: ActionIcon { x: limitPicker.width - width - 12; y: (limitPicker.height - height) / 2; width: 18; height: 18; kind: "chevronDown"; stroke: theme.muted }
                 }

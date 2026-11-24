@@ -19,10 +19,10 @@ void VkApiClient::cancel()
     for (const auto &reply : active) if (reply) { reply->disconnect(this); reply->abort(); reply->deleteLater(); }
 }
 
-void VkApiClient::request(const QString &method, Form params, Callback callback)
+void VkApiClient::request(const QString &method, Form params, Callback callback, Condition stillNeeded)
 {
     const bool background = method.startsWith("messages.get") || method.startsWith("messages.search") || method == "messages.setActivity";
-    m_queue.append({method, std::move(params), std::move(callback), 0, background ? 1 : 0});
+    m_queue.append({method, std::move(params), std::move(callback), std::move(stillNeeded), 0, background ? 1 : 0});
     if (!m_pace.isActive()) pump();
 }
 
@@ -44,6 +44,7 @@ void VkApiClient::pump()
 
 void VkApiClient::perform(Request pending)
 {
+    if (pending.stillNeeded && !pending.stillNeeded()) return;
     auto params = pending.params;
     params.append({"access_token", m_token}); params.append(qMakePair(QString("v"), QString("5.199")));
     QNetworkRequest request(QUrl("https://api.vk.ru/method/" + pending.method));

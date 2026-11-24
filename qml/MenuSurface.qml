@@ -1,14 +1,12 @@
 import QtQuick
 
-Item {
+GlassSurface {
     id: surface
-    property color color: "#222222"
-    property color borderColor: "#363636"
+    dark: (color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722) < 0.5
+    color: "#c2142338"
+    borderColor: dark ? "#587f9ebb" : "#c9ffffff"
+    highlightColor: dark ? "#8eb7daf9" : "#f2ffffff"
+    radius: 18
     implicitWidth: 240
     implicitHeight: 44
-    // Keep the surface visible with both hardware and software rendering.
-    Rectangle { x: -6; y: -2; width: parent.width + 12; height: parent.height + 14; radius: 20; color: "#06000000" }
-    Rectangle { x: -3; y: 1; width: parent.width + 6; height: parent.height + 8; radius: 17; color: "#0a000000" }
-    Rectangle { x: -1; y: 3; width: parent.width + 2; height: parent.height + 3; radius: 15; color: "#14000000" }
-    Rectangle { anchors.fill: parent; radius: 14; color: surface.color; border.color: surface.borderColor }
 }

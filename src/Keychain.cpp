@@ -3,19 +3,22 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 
-static CFMutableDictionaryRef query()
+static CFMutableDictionaryRef query(const QByteArray &account)
 {
     auto result = CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
                                             &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(result, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(result, kSecAttrService, CFSTR("dev.reforged.messenger"));
-    CFDictionarySetValue(result, kSecAttrAccount, CFSTR("vk-session"));
+    auto name = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8 *>(account.constData()),
+                                        account.size(), kCFStringEncodingUTF8, false);
+    CFDictionarySetValue(result, kSecAttrAccount, name);
+    CFRelease(name);
     return result;
 }
 
-QByteArray Keychain::read()
+QByteArray Keychain::read(const QByteArray &account)
 {
-    auto q = query();
+    auto q = query(account);
     CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
     CFTypeRef data = nullptr;
@@ -30,9 +33,9 @@ QByteArray Keychain::read()
     return result;
 }
 
-bool Keychain::write(const QByteArray &value)
+bool Keychain::write(const QByteArray &value, const QByteArray &account)
 {
-    auto q = query();
+    auto q = query(account);
     auto data = CFDataCreate(nullptr, reinterpret_cast<const UInt8 *>(value.constData()), value.size());
     auto attributes = CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
                                                 &kCFTypeDictionaryValueCallBacks);
@@ -49,9 +52,9 @@ bool Keychain::write(const QByteArray &value)
     return status == errSecSuccess;
 }
 
-void Keychain::clear()
+void Keychain::clear(const QByteArray &account)
 {
-    auto q = query();
+    auto q = query(account);
     SecItemDelete(q);
     CFRelease(q);
 }
@@ -71,37 +74,37 @@ const SecretSchema sessionSchema = {
 };
 }
 
-QByteArray Keychain::read()
+QByteArray Keychain::read(const QByteArray &account)
 {
     GError *error = nullptr;
     gchar *password = secret_password_lookup_sync(&sessionSchema, nullptr, &error,
-        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", account.constData(), nullptr);
     if (error) { g_error_free(error); return {}; }
     const QByteArray result = password ? QByteArray::fromBase64(password) : QByteArray();
     if (password) secret_password_free(password);
     return result;
 }
 
-bool Keychain::write(const QByteArray &value)
+bool Keychain::write(const QByteArray &value, const QByteArray &account)
 {
     GError *error = nullptr;
     const auto encoded = value.toBase64();
     const bool stored = secret_password_store_sync(&sessionSchema, SECRET_COLLECTION_DEFAULT,
-        "VK Messenger session", encoded.constData(), nullptr, &error,
-        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+        account == "vk-session" ? "VK Messenger session" : "VK Messenger AI API key", encoded.constData(), nullptr, &error,
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", account.constData(), nullptr);
     if (error) g_error_free(error);
     return stored;
 }
 
-void Keychain::clear()
+void Keychain::clear(const QByteArray &account)
 {
     GError *error = nullptr;
     secret_password_clear_sync(&sessionSchema, nullptr, &error,
-        "service", VKM_KEYCHAIN_SERVICE_ID, "account", "vk-session", nullptr);
+        "service", VKM_KEYCHAIN_SERVICE_ID, "account", account.constData(), nullptr);
     if (error) g_error_free(error);
 }
 #else
-QByteArray Keychain::read() { return {}; }
-bool Keychain::write(const QByteArray &) { return false; }
-void Keychain::clear() {}
+QByteArray Keychain::read(const QByteArray &account) { return {}; }
+bool Keychain::write(const QByteArray &, const QByteArray &) { return false; }
+void Keychain::clear(const QByteArray &account) {}
 #endif

@@ -76,6 +76,8 @@ signals:
     void changed();
     void completed();
     void messageEdited(const QString &peer, const QString &cmid);
+    void messagesDeletionStarted(const QString &peer, const QStringList &cmids);
+    void messagesDeleted(const QString &peer, const QStringList &cmids);
     void mediaRequested(const QUrl &source, const QString &type, const QString &title);
     void photoGalleryRequested(const QVariantList &photos, int selectedIndex);
     void reactionAssetsChanged();

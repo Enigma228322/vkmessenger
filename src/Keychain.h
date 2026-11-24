@@ -2,7 +2,7 @@
 #include <QByteArray>
 
 namespace Keychain {
-QByteArray read();
-bool write(const QByteArray &value);
-void clear();
+QByteArray read(const QByteArray &account = "vk-session");
+bool write(const QByteArray &value, const QByteArray &account = "vk-session");
+void clear(const QByteArray &account = "vk-session");
 }

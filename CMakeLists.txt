@@ -21,12 +21,16 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 20)
     qt_add_plugin(vkm-webp STATIC CLASS_NAME VkmWebPPlugin src/platform/WebPPlugin.mm)
     target_link_libraries(vkm-webp PRIVATE Qt6::Gui "-framework ImageIO" "-framework CoreGraphics")
-    add_library(vkm-platform STATIC src/platform/Preferences.mm src/platform/NotificationBackend.mm)
+    add_library(vkm-platform STATIC src/platform/IdleSleepInhibitor.mm src/platform/Preferences.mm src/platform/NotificationBackend.mm)
     set_source_files_properties(src/platform/NotificationBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(vkm-platform PRIVATE Qt6::Core "-framework AppKit" "-framework UserNotifications")
 else()
-    add_library(vkm-platform STATIC src/platform/Preferences.cpp src/platform/NotificationBackend.cpp)
+    add_library(vkm-platform STATIC src/platform/IdleSleepInhibitor.cpp src/platform/Preferences.cpp src/platform/NotificationBackend.cpp)
     target_link_libraries(vkm-platform PRIVATE Qt6::Core)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(Qt6 REQUIRED COMPONENTS DBus)
+        target_link_libraries(vkm-platform PRIVATE Qt6::DBus)
+    endif()
 endif()
 target_include_directories(vkm-platform PUBLIC src)
 if(APPLE)
@@ -39,7 +43,7 @@ qt_add_executable(VK MACOSX_BUNDLE
     src/OAuth.cpp src/OAuth.h src/Keychain.cpp src/Keychain.h
     src/LongPoll.cpp src/LongPoll.h src/LongPollEvent.h src/Form.h
     src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h
-    src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
+    src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/messaging/AutoReplyController.cpp src/messaging/AutoReplyController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
     src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
 # On Linux the binary "VK" must not collide with the QML module's VK directory.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -47,6 +51,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 qt_add_qml_module(VK
     URI VK VERSION 1.0
+    QML_FILES qml/AutoReplyDialog.qml qml/GlassSurface.qml qml/AmbientBackdrop.qml qml/MessageExplosion.qml
     QML_FILES qml/CacheDialog.qml qml/LinkPreview.qml qml/TransferCard.qml qml/ForwardedMessages.qml qml/ScrollDateBadge.qml qml/CachedAvatar.qml qml/PhotoLayout.js qml/CachedImage.qml qml/PhotoGrid.qml qml/ReplyPreview.qml qml/MenuSurface.qml qml/AppMenu.qml qml/AppMenuItem.qml qml/AppMenuSeparator.qml qml/PinnedMessageBar.qml qml/ConversationProfile.qml qml/ActionIcon.qml qml/Theme.qml qml/MessageActionPopup.qml qml/Main.qml qml/ReactionImage.qml qml/ReadIndicator.qml qml/FolderSheet.qml qml/MediaViewer.qml qml/ActionSheet.qml qml/MethodBrowser.qml qml/ResultView.qml qml/AttachmentView.qml qml/BotKeyboard.qml)
 target_compile_definitions(VK PRIVATE VKM_ENABLE_API_INSPECTOR=$<BOOL:${VKM_ENABLE_API_INSPECTOR}>)
 target_include_directories(VK PRIVATE src src/media "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -144,7 +149,7 @@ if(BUILD_TESTING)
     qt_add_executable(messenger-tests tests/MessengerTest.cpp src/media/AvatarImage.cpp src/media/AvatarImage.h src/models/ConversationFilterModel.cpp src/models/ConversationFilterModel.h
         src/platform/DesktopNotifications.cpp src/platform/DesktopNotifications.h
         src/Messenger.cpp src/Messenger.h src/OAuth.cpp src/OAuth.h src/LongPoll.cpp src/LongPoll.h
-        src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
+        src/storage/LocalStore.cpp src/storage/LocalStore.h src/api/VkApiClient.cpp src/api/VkApiClient.h src/messaging/ActionController.cpp src/messaging/ActionController.h src/messaging/FolderController.cpp src/messaging/FolderController.h src/messaging/AutoReplyController.cpp src/messaging/AutoReplyController.h src/media/MediaCache.cpp src/media/MediaCache.h src/media/VoiceRecorder.cpp src/media/VoiceRecorder.h src/media/OggOpusWriter.cpp src/media/OggOpusWriter.h
         src/Methods.cpp src/Methods.h src/Transfers.cpp src/Transfers.h src/LottieSticker.cpp src/LottieSticker.h src/media/VideoFrameOutput.cpp src/media/VideoFrameOutput.h)
     qt_add_resources(messenger-tests test-photo-layout PREFIX "/qt/qml/VK" FILES qml/PhotoLayout.js)
     target_include_directories(messenger-tests PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -174,6 +179,7 @@ if(BUILD_TESTING)
     target_link_libraries(sticker-tests PRIVATE Qt6::Test Qt6::Quick Qt6::Network Qt6::Concurrent rlottie::rlottie ZLIB::ZLIB)
     add_test(NAME sticker-tests COMMAND sticker-tests)
     set_tests_properties(voice-codec-tests media-cache-tests storage-tests protocol-tests messenger-tests longpoll-tests methods-tests transfers-tests sticker-tests PROPERTIES TIMEOUT 90)
-    # The expanded UI/network suite needs headroom beyond the 90-second default.
-    set_tests_properties(messenger-tests PROPERTIES TIMEOUT 120)
+    # UI/network regressions include delayed deletion and capture lifecycles.
+    # Leave headroom for software rendering and slower CI machines.
+    set_tests_properties(messenger-tests PROPERTIES TIMEOUT 180)
 endif()

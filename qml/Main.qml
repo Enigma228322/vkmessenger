@@ -11,12 +11,16 @@ ApplicationWindow {
     minimumWidth: 780
     minimumHeight: 560
     visible: true
-    onActiveChanged: messenger.refreshPreferences()
+    onActiveChanged: {
+        messenger.refreshPreferences()
+        if (!active && deletionExplosion) window.clearDeletionEffects()
+    }
     title: "VK"
     color: canvasColor
     font.family: Qt.platform.os === "osx" ? ".AppleSystemUIFont" : "sans-serif"
     font.pixelSize: 14
     Theme { id: design; dark: window.darkTheme }
+    background: AmbientBackdrop { objectName: "liquidGlassBackdrop"; theme: design }
     property bool flatMessages: messenger.flatMessages
     property color ink: design.ink
     property color muted: design.muted
@@ -28,6 +32,14 @@ ApplicationWindow {
     readonly property bool editing: editingMessage.length > 0
     property var submittedDrafts: ({})
     property string draftPeer: ""
+    property var currentAutoReply: ({})
+    onDraftPeerChanged: currentAutoReply = messenger.autoReply.settings(draftPeer)
+    Connections {
+        target: messenger.autoReply
+        function onSettingsChanged() {
+            window.currentAutoReply = messenger.autoReply.settings(window.draftPeer)
+        }
+    }
     readonly property var draftAttachments: {
         const pending = messenger.transfers.pending, result = []
         for (let i = 0; i < pending.length; ++i)
@@ -42,12 +54,39 @@ ApplicationWindow {
     property real savedOffset: 0
     property string geometryAnchor: ""
     property real geometryOffset: 0
-    property bool restoringGeometry: false
+    property string requestedCmid: ""
     property string previousLast: ""
     property int newMessages: 0
     property var selectedIds: []
+    property var confirmedDeletionIds: ({})
+    property var pendingDeletionIds: ({})
+    property var removedDeletionFrames: []
+    property int deletionVisualEpoch: 0
+    property int pendingExplosionCaptures: 0
+    function clearDeletionEffects() {
+        confirmedDeletionIds = ({})
+        pendingDeletionIds = ({})
+        removedDeletionFrames = []
+        ++deletionVisualEpoch
+        deletionExpiry.stop()
+        deletionExplosion.clear()
+    }
+    Timer {
+        id: deletionExpiry; interval: 15000
+        onTriggered: {
+            window.confirmedDeletionIds = ({})
+            window.pendingDeletionIds = ({})
+            window.removedDeletionFrames = []
+        }
+    }
     property bool darkTheme: messenger.darkTheme
     readonly property bool motionEnabled: window.active && !messenger.reduceMotion
+    onMotionEnabledChanged: {
+        if (!motionEnabled && followArrival && followArrival.running) {
+            followArrival.stop()
+            Qt.callLater(window.settleHistoryViewport)
+        }
+    }
     property color surface: design.surface
     property color secondarySurface: design.secondary
     property color canvasColor: design.canvas
@@ -63,10 +102,10 @@ ApplicationWindow {
     palette.dark: design.divider
     palette.placeholderText: design.muted
     palette.highlight: accent
-    palette.highlightedText: darkTheme ? "#ffffff" : "#172536"
+    palette.highlightedText: darkTheme ? "#172536" : "#ffffff"
     function messageActions(kind, item) {
         if (kind === "edit") {
-            if (messenger.actions.busy || item.local || !item.outgoing) return
+            if (messenger.actions.busy || !messagePopup.canEdit(item)) return
             editingPeer = messenger.selectedPeer
             editingMessage = String(item.id)
             editingHasAttachments = (item.attachments || []).length > 0
@@ -86,6 +125,17 @@ ApplicationWindow {
         editingPeer = ""
         restoreDraft()
         composer.forceActiveFocus()
+    }
+    function editLastMessage() {
+        if (editing || messenger.actions.busy || messenger.hasNewer || !messenger.canWrite) return false
+        for (let i = history.count - 1; i >= 0; --i) {
+            const item = messenger.messages.get(i)
+            if (messagePopup.canEdit(item)) {
+                messageActions("edit", item)
+                return true
+            }
+        }
+        return false
     }
     Binding { target: messenger.filteredConversations; property: "query"; value: window.search }
     Binding { target: messenger.filteredConversations; property: "category"; value: window.conversationFilter }
@@ -111,25 +161,56 @@ ApplicationWindow {
         return a.length !== b.length ? a.length > b.length : a > b
     }
     function goToEnd() {
+        followArrival.stop()
+        history.pendingArrival = false
         history.cancelFlick()
         window.wasAtEnd = true
         window.newMessages = 0
-        history.forceLayout()
-        history.positionViewAtEnd()
-        history.contentY = Math.max(history.originY - history.topMargin, history.originY + history.contentHeight - history.height + history.bottomMargin)
-        tailPosition.restart()
+        window.requestedCmid = ""
+        window.savedAnchor = ""
+        Qt.callLater(window.settleHistoryViewport)
     }
 
-    Timer {
-        id: tailPosition
-        interval: 16
-        onTriggered: {
-            if (window.wasAtEnd) {
-                history.forceLayout()
-                history.positionViewAtEnd()
-                history.contentY = Math.max(history.originY - history.topMargin, history.originY + history.contentHeight - history.height + history.bottomMargin)
+    function settleHistoryViewport() {
+        if (!history || history.moving || historyScrollBar.pressed) return
+        history.forceLayout()
+        if (requestedCmid.length) {
+            const index = messenger.messages.find(requestedCmid)
+            requestedCmid = ""
+            if (index >= 0) history.positionViewAtIndex(index, ListView.Center)
+        } else if (wasAtEnd && (!history.atYEnd || followArrival.running)) {
+            // A distant tail has to be instantiated before ListView knows its extent.
+            if (history.count && !history.itemAtIndex(history.count - 1)) history.positionViewAtEnd()
+            const bottom = Math.max(history.originY - history.topMargin,
+                                    history.originY + history.contentHeight - history.height + history.bottomMargin)
+            const distance = bottom - history.contentY
+            if (window.motionEnabled && (history.pendingArrival || followArrival.running)
+                    && distance > 0 && distance < history.height / 2) {
+                if (!followArrival.running || followArrival.to !== bottom) {
+                    followArrival.stop()
+                    followArrival.from = history.contentY
+                    followArrival.to = bottom
+                    followArrival.start()
+                }
+            } else {
+                followArrival.stop()
+                if (distance !== 0) history.contentY = bottom
+            }
+        } else if (savedAnchor.length) {
+            const index = messenger.messages.find(savedAnchor)
+            if (index >= 0) {
+                let row = history.itemAtIndex(index)
+                if (!row) {
+                    history.positionViewAtIndex(index, ListView.Beginning)
+                    row = history.itemAtIndex(index)
+                }
+                if (row && Math.abs(history.contentY - row.y - savedOffset) > 0.5)
+                    history.contentY = row.y + savedOffset
             }
         }
+        savedAnchor = ""
+        history.pendingArrival = false
+        geometrySnapshot.restart()
     }
 
     function visibleHistoryRows() {
@@ -194,17 +275,20 @@ ApplicationWindow {
         font.weight: Font.DemiBold
         scale: action.down && window.motionEnabled ? 0.97 : 1
         Behavior on scale { enabled: window.motionEnabled; NumberAnimation { duration: design.pressDuration; easing.type: Easing.OutCubic } }
-        background: Rectangle {
-            radius: 10
+        background: GlassSurface {
+            dark: window.darkTheme
+            elevated: action.primary
+            radius: 14
             color: !action.enabled ? design.secondary : action.primary
-                ? (action.down ? "#0066db" : action.hovered ? "#1683ff" : window.accent)
+                ? (action.down ? Qt.darker(window.accent, 1.12) : action.hovered ? Qt.darker(window.accent, 1.04) : window.accent)
                 : (action.hovered ? design.hover : action.quiet ? "transparent" : window.palette.button)
-            border.color: action.activeFocus ? window.accent : "transparent"
+            borderColor: action.activeFocus ? window.accent : design.glassBorder
+            highlightColor: design.glassHighlight
             Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
         contentItem: Text {
             text: action.text
-            color: !action.enabled ? "#98a3af" : action.primary ? "white" : window.ink
+            color: !action.enabled ? design.muted : action.primary ? (window.darkTheme ? "#172536" : "white") : window.ink
             font: action.font
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
@@ -224,11 +308,13 @@ ApplicationWindow {
         ToolTip.delay: 650
         scale: down && window.motionEnabled ? 0.94 : 1
         Behavior on scale { enabled: window.motionEnabled; NumberAnimation { duration: design.pressDuration; easing.type: Easing.OutCubic } }
-        background: Rectangle {
-            radius: 10
-            color: headerAction.down ? design.pressed : headerAction.hovered ? design.hover : "transparent"
-            border.width: 1
-            border.color: headerAction.visualFocus ? window.accent : "transparent"
+        background: GlassSurface {
+            dark: window.darkTheme
+            elevated: false
+            radius: 13
+            color: headerAction.down ? design.pressed : headerAction.hovered ? design.glassSelection : design.glassInput
+            borderColor: headerAction.visualFocus ? window.accent : design.glassBorder
+            highlightColor: design.glassHighlight
             Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
         contentItem: ActionIcon { opacity: headerAction.enabled ? 1 : 0.4; kind: headerAction.kind; stroke: headerAction.hovered || headerAction.visualFocus ? window.ink : window.muted; Behavior on stroke { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } } }
@@ -245,9 +331,9 @@ ApplicationWindow {
             horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
         }
         background: Rectangle {
-            radius: 9
-            color: tab.highlighted ? design.selected : tab.hovered ? design.hover : "transparent"
-            border.color: tab.visualFocus ? window.accent : "transparent"
+            radius: 12
+            color: tab.highlighted ? design.glassSelection : tab.hovered ? design.hover : "transparent"
+            border.color: tab.visualFocus ? window.accent : tab.highlighted ? design.glassBorder : "transparent"
             Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
     }
@@ -258,12 +344,15 @@ ApplicationWindow {
         color: window.ink
         selectByMouse: true
         leftPadding: 12
-        placeholderTextColor: "#8c98a6"
-        background: Rectangle {
-            radius: 9
-            color: window.secondarySurface
-            border.color: input.activeFocus ? window.accent : design.divider
-            Behavior on border.color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
+        placeholderTextColor: design.muted
+        background: GlassSurface {
+            dark: window.darkTheme
+            elevated: false
+            radius: 14
+            color: design.glassInput
+            borderColor: input.activeFocus ? window.accent : design.glassBorder
+            highlightColor: design.glassHighlight
+            Behavior on borderColor { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
         }
     }
 
@@ -363,15 +452,15 @@ ApplicationWindow {
                 if (composer.text === submitted) composer.clear()
             }
             delete window.submittedDrafts[peer]
-            if (peer === messenger.selectedPeer) {
-                window.wasAtEnd = true
-                Qt.callLater(function() { history.positionViewAtEnd() })
-            }
+            if (peer === messenger.selectedPeer && submitted !== undefined && !window.wasAtEnd) window.goToEnd()
         }
         function onChanged() {
             if (messenger.browserLoginPending && (messenger.browserLoginUsesToken || messenger.redirectUri.indexOf("https://") === 0)) loginReturn.open()
             else if (!messenger.authorizing) loginReturn.close()
             if (messenger.selectedPeer !== window.draftPeer) {
+                followArrival.stop()
+                history.pendingArrival = false
+                window.clearDeletionEffects()
                 window.editingMessage = ""
                 window.editingPeer = ""
                 messagePopup.close()
@@ -380,50 +469,54 @@ ApplicationWindow {
                 window.restoreDraft()
                 window.newMessages = 0
                 window.selectedIds = []
+                window.wasAtEnd = true
+                window.savedAnchor = ""
+                window.geometryAnchor = ""
+                window.requestedCmid = ""
+                Qt.callLater(window.settleHistoryViewport)
             }
             if (!messenger.connected) {
+                window.clearDeletionEffects()
                 window.submittedDrafts = ({})
                 window.draftPeer = ""
                 composer.clear()
             }
         }
         function onDraftChanged() { window.restoreDraft() }
-        function onScrollToEnd() { Qt.callLater(window.goToEnd) }
+        function onScrollToEnd() { window.goToEnd() }
         function onScrollToMessage(cmid) {
+            followArrival.stop()
+            history.pendingArrival = false
+            history.cancelFlick()
             window.wasAtEnd = false
-            tailPosition.stop()
-            Qt.callLater(function() { const i = messenger.messages.find(cmid); if (i >= 0) history.positionViewAtIndex(i, ListView.Center) })
+            window.savedAnchor = ""
+            window.requestedCmid = cmid
+            Qt.callLater(window.settleHistoryViewport)
         }
         function onHistoryAboutToChange() {
             messagePopup.close()
             if (window.draftPeer !== messenger.selectedPeer) {
+                window.clearDeletionEffects()
                 window.wasAtEnd = true; window.savedAnchor = ""; window.previousLast = ""; return
             }
-            window.wasAtEnd = history.atYEnd && !messenger.hasNewer
-            window.savedAnchor = ""
             window.previousLast = messenger.latestMessageCmid()
+            if (window.wasAtEnd || window.savedAnchor.length || history.moving || historyScrollBar.pressed) return
             const rows = window.visibleHistoryRows()
             if (rows.length) {
-                window.savedAnchor = String(rows[0].item.id)
+                window.savedAnchor = String(rows[0].item.identity || rows[0].item.id)
                 window.savedOffset = history.contentY - rows[0].y
             }
         }
         function onHistoryChanged() {
             if (!window.wasAtEnd && window.previousLast.length)
                 window.newMessages += messenger.newIncomingMessageCount(window.previousLast)
-            const anchor = window.savedAnchor, offset = window.savedOffset, atEnd = window.wasAtEnd
-            Qt.callLater(function() {
-                if (atEnd) window.goToEnd()
-                else if (anchor.length) {
-                    const i = messenger.messages.find(anchor)
-                    if (i >= 0) { history.positionViewAtIndex(i, ListView.Beginning); history.contentY += offset }
-                }
-            })
+            Qt.callLater(window.settleHistoryViewport)
         }
     }
 
     ColumnLayout {
         anchors.fill: parent
+        anchors.margins: 12
         spacing: 0
 
         Rectangle {
@@ -450,12 +543,17 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 0
+            spacing: 12
 
-            Rectangle {
+            GlassSurface {
+                objectName: "sidebarGlass"
                 Layout.preferredWidth: Math.max(280, Math.min(330, window.width * 0.29))
                 Layout.fillHeight: true
-                color: window.surface
+                color: design.glassTint
+                borderColor: design.glassBorder
+                highlightColor: design.glassHighlight
+                dark: window.darkTheme
+                radius: 26
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 18
@@ -463,7 +561,7 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Rectangle {
-                            width: 36; height: 36; radius: 11; color: window.accent
+                            width: 36; height: 36; radius: 11; color: "#2173d8"
                             Text { anchors.centerIn: parent; text: "VK"; color: "#ffffff"; font.pixelSize: 23; font.bold: true }
                         }
                         ColumnLayout {
@@ -636,13 +734,13 @@ ApplicationWindow {
                             width: ListView.view.width
                             height: 66 + (startsUnpinned ? 12 : 0)
                             radius: 12
-                            border.width: chats.activeFocus && ListView.isCurrentItem ? 1 : 0
-                            border.color: window.accent
+                            border.width: 1
+                            border.color: chats.activeFocus && ListView.isCurrentItem ? window.accent : messenger.selectedPeer === item.peer ? design.glassBorder : "transparent"
                             Accessible.role: Accessible.ListItem
                             Accessible.name: item.title + (item.unread > 0 ? ", непрочитанных: " + item.unread : item.markedUnread ? ", не прочитано" : "")
                             Accessible.selected: messenger.selectedPeer === item.peer
                             Accessible.onPressAction: window.selectChat(chat.item.peer, chat.item.title)
-                            color: messenger.selectedPeer === item.peer ? (window.darkTheme ? "#333333" : "#eaf3ff") : "transparent"
+                            color: messenger.selectedPeer === item.peer ? design.glassSelection : "transparent"
                             Behavior on color { enabled: window.motionEnabled && chat.visible && !chats.moving; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
                             Rectangle {
                                 anchors.left: parent.left
@@ -681,7 +779,7 @@ ApplicationWindow {
                                         Rectangle {
                                             visible: chat.item.unread > 0 || !!chat.item.markedUnread
                                             width: Math.max(20, unreadText.implicitWidth + 10); height: 20; radius: 10; color: chat.item.muted ? design.divider : window.accent
-                                            Text { id: unreadText; anchors.centerIn: parent; text: chat.item.unread > 0 ? chat.item.unread : "•"; color: chat.item.muted ? window.ink : "#ffffff"; font.pixelSize: 10; font.bold: true }
+                                            Text { id: unreadText; anchors.centerIn: parent; text: chat.item.unread > 0 ? chat.item.unread : "•"; color: chat.item.muted ? window.ink : window.palette.highlightedText; font.pixelSize: 10; font.bold: true }
                                         }
                                     }
                                 }
@@ -747,7 +845,7 @@ ApplicationWindow {
                                 Rectangle {
                                     x: unreadSwitch.checked ? 19 : 3; y: 3
                                     width: 18; height: 18; radius: 9
-                                    color: unreadSwitch.checked ? "white" : window.muted
+                                    color: unreadSwitch.checked ? window.palette.highlightedText : window.muted
                                     Behavior on x { enabled: window.motionEnabled; NumberAnimation { duration: design.pressDuration; easing.type: Easing.OutCubic } }
                                 }
                             }
@@ -768,8 +866,6 @@ ApplicationWindow {
                     }
                 }
             }
-            Rectangle { Layout.fillHeight: true; width: 1; color: design.divider }
-
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -850,11 +946,15 @@ ApplicationWindow {
                         Button { text: "Восстановить последнее"; enabled: !messenger.operationBusy; onClicked: messenger.restoreLast() }
                         Button { text: "×"; onClicked: messenger.dismissRestore() }
                     }
-                    Rectangle {
+                    GlassSurface {
+                        objectName: "chatHeaderGlass"
                         Layout.fillWidth: true
                         height: 78
-                        color: window.surface
-                        Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: design.divider }
+                        color: design.glassTint
+                        borderColor: design.glassBorder
+                        highlightColor: design.glassHighlight
+                        dark: window.darkTheme
+                        radius: 24
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 26
@@ -883,8 +983,18 @@ ApplicationWindow {
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        readonly property string replyError: window.currentAutoReply.enabled ? window.currentAutoReply.error || "" : ""
+                                        text: [messenger.peerTyping ? messenger.peerPresence : messenger.peerActivity, replyError || (window.currentAutoReply.enabled ? "Автоответы включены" : "")].filter(Boolean).join(" · ")
+                                        textFormat: Text.PlainText; elide: Text.ElideRight; font.pixelSize: 12
+                                        color: replyError ? design.errorText : window.muted
+                                        TapHandler { enabled: parent.replyError.length > 0; onTapped: autoReplyDialog.present() }
+                                        Accessible.role: replyError ? Accessible.Button : Accessible.StaticText
+                                        Accessible.name: text
+                                        Accessible.onPressAction: if (replyError) autoReplyDialog.present()
+                                    }
                                     BusyIndicator { objectName: "historyRefreshIndicator"; Layout.preferredWidth: 14; Layout.preferredHeight: 14; visible: messenger.loading && history.count > 0; running: visible && window.motionEnabled; Accessible.name: "Обновление переписки" }
-                                    Text { Layout.fillWidth: true; text: messenger.peerActivity; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                                 }
                             }
                             HeaderAction { id: profileButton; kind: "info"; label: "Информация о переписке"
@@ -895,7 +1005,6 @@ ApplicationWindow {
                                 onClicked: actionSheet.show("search", messenger.selectedPeer, [], "") }
                             HeaderAction { kind: "more"; label: "Действия с перепиской"; onClicked: conversationMenu.popup() }
                         }
-                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: design.divider }
                     }
                     PinnedMessageBar {
                         Layout.fillWidth: true
@@ -926,6 +1035,12 @@ ApplicationWindow {
                     ListView {
                         id: history
                         objectName: "historyList"
+                        property bool pendingArrival: false
+                        NumberAnimation {
+                            id: followArrival
+                            target: history; property: "contentY"
+                            duration: 200; easing.type: Easing.OutCubic
+                        }
                         anchors.fill: parent
                         model: messenger.messages
                         clip: true
@@ -936,33 +1051,112 @@ ApplicationWindow {
                         flickableDirection: Flickable.VerticalFlick
                         boundsBehavior: Flickable.StopAtBounds
                         onWidthChanged: { messagePopup.close(); window.restoreGeometryAnchor() }
-                        ScrollBar.vertical: ScrollBar { id: historyScrollBar }
+                        onHeightChanged: window.restoreGeometryAnchor()
+                        function releaseAnchor() {
+                            followArrival.stop()
+                            pendingArrival = false
+                            window.wasAtEnd = false
+                            window.savedAnchor = ""
+                            window.requestedCmid = ""
+                            messagePopup.close()
+                        }
+                        ScrollBar.vertical: ScrollBar {
+                            id: historyScrollBar
+                            onPressedChanged: {
+                                if (pressed) history.releaseAnchor()
+                                else window.wasAtEnd = history.atYEnd && !messenger.hasNewer
+                            }
+                        }
                         header: Item {
                             width: history.width
                             height: messenger.hasOlder && !messenger.demo ? 50 : 0
                             Button { anchors.centerIn: parent; visible: parent.height > 0; text: messenger.loading ? "Загрузка…" : "Загрузить предыдущие сообщения"; enabled: !messenger.loading; onClicked: messenger.loadOlder() }
                         }
-                        onMovementEnded: window.wasAtEnd = atYEnd
-                        onMovementStarted: { window.wasAtEnd = false; tailPosition.stop(); messagePopup.close() }
-                        onContentHeightChanged: { if (window.wasAtEnd) tailPosition.restart(); geometrySnapshot.restart() }
+                        onMovementEnded: window.wasAtEnd = atYEnd && !messenger.hasNewer
+                        onMovementStarted: releaseAnchor()
+                        onContentHeightChanged: {
+                            if (window.wasAtEnd) Qt.callLater(window.settleHistoryViewport)
+                            geometrySnapshot.restart()
+                        }
                         onContentYChanged: {
                             geometrySnapshot.restart()
-                            if (moving || dragging) window.wasAtEnd = atYEnd
                             if (atYEnd && !messenger.hasNewer) window.newMessages = 0
                         }
                         Connections {
                             target: messenger.messages
-                            function onModelAboutToBeReset() { window.wasAtEnd = window.draftPeer !== messenger.selectedPeer || history.atYEnd || history.count === 0 }
+                            function onModelAboutToBeReset() {
+                                if (window.draftPeer !== messenger.selectedPeer || history.count === 0) window.wasAtEnd = true
+                            }
                             function onModelReset() {
-                                if (window.wasAtEnd) Qt.callLater(window.goToEnd)
+                                Qt.callLater(window.settleHistoryViewport)
                             }
                         }
                         delegate: Item {
                             id: entry
-                            Component.onCompleted: if (item.local && !messenger.reduceMotion) messageAppear.start()
-                            NumberAnimation { id: messageAppear; target: entry; property: "opacity"; from: 0; to: 1; duration: design.motionDuration; easing.type: Easing.OutCubic }
+                            property real arrival: 1
+                            opacity: window.motionEnabled ? arrival : 1
+                            transform: Translate { y: window.motionEnabled ? 8 * (1 - entry.arrival) : 0 }
+                            ListView.onAdd: {
+                                const newer = window.isNewerId(String(item.cmid || item.id), window.previousLast)
+                                if (window.motionEnabled && !item.gap && (item.local || newer || (messenger.demo && !item.cmid && item.outgoing) || history.count === 1)) {
+                                    messageAppear.start()
+                                    if (window.wasAtEnd) {
+                                        history.pendingArrival = true
+                                        Qt.callLater(window.settleHistoryViewport)
+                                    }
+                                }
+                            }
+                            NumberAnimation { id: messageAppear; target: entry; property: "arrival"; from: 0; to: 1; duration: 280; easing.type: Easing.OutCubic }
                             objectName: "messageRow"
                             required property var item
+                            property var deletionCapture: null
+                            function finishDeletionCapture(result) {
+                                const capture = deletionCapture
+                                if (!capture || capture.done) return
+                                capture.done = true
+                                captureTimeout.stop()
+                                window.pendingExplosionCaptures = Math.max(0, window.pendingExplosionCaptures - 1)
+                                if (capture.epoch === window.deletionVisualEpoch && capture.peer === messenger.selectedPeer) {
+                                    if (window.confirmedDeletionIds[capture.id]) {
+                                        delete window.confirmedDeletionIds[capture.id]
+                                        deletionExplosion.burst(capture.rect, result)
+                                    } else if (window.pendingDeletionIds[capture.id]) {
+                                        // Long Poll can remove the row before the HTTP confirmation.
+                                        window.removedDeletionFrames = window.removedDeletionFrames.concat([
+                                            {id: capture.id, rect: capture.rect, image: result}])
+                                    }
+                                }
+                                ListView.delayRemove = false
+                            }
+                            Component.onDestruction: {
+                                // A model reset can destroy a delegate even with delayRemove.
+                                // The callback shares this flag and never touches a dead item.
+                                if (deletionCapture && !deletionCapture.done) {
+                                    deletionCapture.done = true
+                                    window.pendingExplosionCaptures = Math.max(0, window.pendingExplosionCaptures - 1)
+                                }
+                            }
+                            Timer { id: captureTimeout; interval: 180; onTriggered: entry.finishDeletionCapture(null) }
+                            ListView.onRemove: {
+                                const id = String(entry.item.id || "")
+                                if (!window.confirmedDeletionIds[id] && !window.pendingDeletionIds[id]) return
+                                if (!window.motionEnabled || !entry.inViewport || entry.item.gap
+                                        || window.pendingExplosionCaptures + window.removedDeletionFrames.length + deletionExplosion.runningBursts >= 4) return
+                                const point = bubble.mapToItem(deletionExplosion, 0, 0)
+                                const capture = {done: false, id: id, epoch: window.deletionVisualEpoch,
+                                    peer: messenger.selectedPeer, rect: Qt.rect(point.x, point.y, bubble.width, bubble.height)}
+                                deletionCapture = capture
+                                ListView.delayRemove = true
+                                ++window.pendingExplosionCaptures
+                                captureTimeout.start()
+                                // Hold only this removed delegate while the renderer captures it.
+                                // The overlay owns the image afterwards, independently of the list.
+                                const scale = Math.min(1, 1000 / Math.max(bubble.width, bubble.height))
+                                if (!bubble.grabToImage(function(result) {
+                                        if (!capture.done) entry.finishDeletionCapture(result)
+                                    }, Qt.size(Math.max(1, Math.ceil(bubble.width * scale)), Math.max(1, Math.ceil(bubble.height * scale)))))
+                                    finishDeletionCapture(null)
+                            }
                             property real inset: window.selectedIds.length ? 44 : history.width < 520 ? 16 : 24
                             property string bodyText: item.raw && (item.raw.attachments || []).length ? (item.raw.text || "") : item.text || ""
                             property bool stickerOnly: (item.attachments || []).length === 1 && item.attachments[0].type === "sticker" && !bodyText.length && !(item.raw && (item.raw.reply_message || (item.raw.fwd_messages || []).length))
@@ -1033,9 +1227,9 @@ ApplicationWindow {
                                         entry.item.raw && (entry.item.raw.fwd_messages || []).length ? 240 : 0,
                                         entry.item.raw && entry.item.raw.keyboard ? 280 : 0))
                                 height: Math.ceil(bubbleLayout.implicitHeight) + verticalPadding * 2
-                                radius: 15
-                                color: window.flatMessages || entry.stickerOnly ? "transparent" : entry.item.outgoing ? (window.darkTheme ? "#234466" : "#dfedff") : window.surface
-                                border.color: window.selectedIds.indexOf(String(entry.item.id)) >= 0 ? window.accent : window.flatMessages || entry.stickerOnly ? "transparent" : (window.darkTheme ? "#364558" : "#e8edf3")
+                                radius: 18
+                                color: window.flatMessages || entry.stickerOnly ? "transparent" : entry.item.outgoing ? design.glassSelection : design.glassTint
+                                border.color: window.selectedIds.indexOf(String(entry.item.id)) >= 0 ? window.accent : window.flatMessages || entry.stickerOnly ? "transparent" : design.glassBorder
                                 HoverHandler { id: bubbleHover }
                                 ToolButton {
                                     text: "···"; width: 24; height: 24; padding: 0
@@ -1118,6 +1312,7 @@ ApplicationWindow {
                                         visible: active; height: item ? item.implicitHeight : 0
                                         sourceComponent: BotKeyboard {
                                             objectName: "messageBotKeyboard"
+                                            theme: design
                                             keyboard: entry.item.raw ? entry.item.raw.keyboard || ({}) : ({})
                                             peer: messenger.selectedPeer; cmid: String(entry.item.id)
                                             author: entry.item.raw ? String(entry.item.raw.from_id || "") : ""
@@ -1193,7 +1388,7 @@ ApplicationWindow {
                                             horizontalAlignment: Text.AlignRight
                                             elide: Text.ElideRight
                                             text: window.deliveryText(entry.item)
-                                            color: entry.item.delivery === "failed" ? "#d17a6b" : "#8295a9"
+                                            color: entry.item.delivery === "failed" ? design.errorText : design.muted
                                             font.pixelSize: 11
                                             MouseArea { anchors.fill: parent; enabled: !!entry.item.local && entry.item.delivery === "failed"; cursorShape: Qt.PointingHandCursor; onClicked: messenger.retryOutgoing(entry.item.id) }
                                         }
@@ -1228,6 +1423,16 @@ ApplicationWindow {
                             Text { width: parent.width; text: messenger.historyError; color: design.errorText; wrapMode: Text.Wrap; textFormat: Text.PlainText }
                             Button { text: "Повторить загрузку"; onClicked: messenger.jumpToEnd() }
                         }
+                    }
+                    MessageExplosion {
+                        id: deletionExplosion
+                        anchors.fill: parent
+                        clip: true
+                        z: 4
+                        reducedMotion: messenger.reduceMotion
+                        windowActive: window.active
+                        accentColor: design.accent
+                        surfaceColor: design.surface
                     }
                     ScrollDateBadge {
                         id: scrollDate
@@ -1276,9 +1481,47 @@ ApplicationWindow {
                                 color: window.darkTheme ? "#172536" : "white"; font.pixelSize: 11; font.weight: Font.DemiBold
                             }
                         }
-                        visible: history.count > 0 && (!history.atYEnd || messenger.hasNewer)
+                        visible: history.count > 0 && ((!window.wasAtEnd && !history.atYEnd) || messenger.hasNewer)
                         onClicked: messenger.jumpToEnd()
                     }
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Rectangle {
+                            id: typingIndicator
+                            objectName: "typingIndicator"
+                            anchors.left: parent.left
+                            anchors.leftMargin: 24
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 54; height: 26; radius: 13
+                            color: design.secondary
+                            visible: messenger.peerTyping
+                            Accessible.role: Accessible.StaticText
+                            Accessible.name: "Собеседник печатает"
+                            property real phase: 0
+                            readonly property bool animating: visible && window.motionEnabled
+                            NumberAnimation on phase {
+                                from: 0; to: 1; duration: 1050; loops: Animation.Infinite
+                                running: typingIndicator.animating
+                            }
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 5
+                                Repeater {
+                                    model: 3
+                                    Rectangle {
+                                        id: dot
+                                        required property int index
+                                        readonly property real pulse: typingIndicator.animating ? (1 + Math.cos(2 * Math.PI * (typingIndicator.phase - index * 0.16))) / 2 : 1
+                                        width: 8; height: 8; radius: 4
+                                        color: design.accent
+                                        opacity: 0.55 + 0.45 * pulse
+                                        transform: Translate { y: typingIndicator.animating ? 1.5 - 3 * dot.pulse : 0 }
+                                    }
+                                }
+                            }
+                        }
                     }
                     ReplyPreview {
                         objectName: "composerReplyPreview"
@@ -1301,6 +1544,7 @@ ApplicationWindow {
                     }
                     BotKeyboard {
                         objectName: "currentBotKeyboard"
+                        theme: design
                         Layout.fillWidth: true
                         Layout.fillHeight: false
                         Layout.leftMargin: 22
@@ -1407,7 +1651,7 @@ ApplicationWindow {
                         onRetryRequested: messenger.transfers.retryDownload()
                         onCancelRequested: { messenger.transfers.cancelDownload(); window.focusComposer() }
                     }
-                    Rectangle {
+                    GlassSurface {
                         objectName: "composerPanel"
                         Layout.fillWidth: true
                         Layout.fillHeight: false
@@ -1416,10 +1660,12 @@ ApplicationWindow {
                         Layout.bottomMargin: 8
                         Layout.topMargin: 0
                         implicitHeight: composerRow.implicitHeight + 22
-                        radius: 16
-                        color: window.secondarySurface
-                        border.color: composer.overLimit ? design.errorText : composer.activeFocus ? design.focusBorder : design.divider
-                        Behavior on border.color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
+                        radius: 24
+                        dark: window.darkTheme
+                        color: design.glassTint
+                        borderColor: composer.overLimit ? design.errorText : composer.activeFocus ? design.focusBorder : design.glassBorder
+                        highlightColor: design.glassHighlight
+                        Behavior on borderColor { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration; easing.type: Easing.OutCubic } }
                         RowLayout {
                             id: composerRow
                             anchors.fill: parent
@@ -1437,7 +1683,7 @@ ApplicationWindow {
                                     Accessible.name: window.editing ? "Редактирование сообщения" : "Сообщение"
                                     placeholderText: messenger.canWrite ? "Написать сообщение…" : "Отправка сообщений в этот диалог недоступна"
                                     readOnly: !messenger.canWrite
-                                    placeholderTextColor: "#9aa6b5"
+                                    placeholderTextColor: design.muted
                                     color: window.ink
                                     wrapMode: TextEdit.Wrap
                                     selectByMouse: true
@@ -1456,6 +1702,9 @@ ApplicationWindow {
                                         if (messenger.sending) return
                                         window.submittedDrafts[messenger.selectedPeer] = text
                                         messenger.sendWithOptions(text, silent === true)
+                                    }
+                                    Keys.onUpPressed: function(event) {
+                                        event.accepted = event.modifiers === Qt.NoModifier && !inputMethodComposing && !text.length && window.editLastMessage()
                                     }
                                     Keys.onReturnPressed: function(event) {
                                         if (inputMethodComposing || event.modifiers & Qt.ShiftModifier) event.accepted = false
@@ -1481,11 +1730,11 @@ ApplicationWindow {
                                     Behavior on color { enabled: window.motionEnabled; ColorAnimation { duration: design.hoverDuration } }
                                 }
                                 contentItem: Item {
-                                    ActionIcon { anchors.centerIn: parent; width: 22; height: 22; kind: sendButton.kind; stroke: sendButton.enabled ? "white" : window.muted; visible: !sendButton.busy }
+                                    ActionIcon { anchors.centerIn: parent; width: 22; height: 22; kind: sendButton.kind; stroke: sendButton.enabled ? window.palette.highlightedText : window.muted; visible: !sendButton.busy }
                                     BusyIndicator { anchors.fill: parent; running: sendButton.busy; visible: running }
                                 }
                                 enabled: (window.editing ? (composer.hasText || window.editingHasAttachments) : (composer.hasText || window.draftAttachments.length > 0)) && !composer.overLimit && !composer.inputMethodComposing && !messenger.sending && (!window.editing || !messenger.actions.busy) && !messenger.authorizing && messenger.canWrite
-                                onClicked: composer.submit()
+                                onClicked: { window.focusComposer(); composer.submit() }
                             }
                             HeaderAction {
                                 kind: "chevronDown"; label: "Способ отправки"; implicitWidth: 24; implicitHeight: 32
@@ -1556,6 +1805,39 @@ ApplicationWindow {
         function onMessageEdited(peer, cmid) {
             if (window.editingPeer === peer && window.editingMessage === cmid) window.cancelEditing()
         }
+        function onMessagesDeleted(peer, cmids) {
+            if (peer !== messenger.selectedPeer) return
+            window.selectedIds = window.selectedIds.filter(function(id) { return cmids.indexOf(String(id)) < 0 })
+            if (!window.motionEnabled) return
+            const ids = Object.assign({}, window.confirmedDeletionIds)
+            for (let i = 0; i < cmids.length; ++i) ids[String(cmids[i])] = true
+            const remaining = []
+            for (let i = 0; i < window.removedDeletionFrames.length; ++i) {
+                const frame = window.removedDeletionFrames[i]
+                if (ids[frame.id]) {
+                    deletionExplosion.burst(frame.rect, frame.image)
+                    delete ids[frame.id]
+                } else remaining.push(frame)
+            }
+            window.removedDeletionFrames = remaining
+            window.confirmedDeletionIds = ids
+            deletionExpiry.restart()
+        }
+        function onMessagesDeletionStarted(peer, cmids) {
+            if (peer !== messenger.selectedPeer || !window.motionEnabled) return
+            const ids = Object.assign({}, window.pendingDeletionIds)
+            for (let i = 0; i < cmids.length; ++i) ids[String(cmids[i])] = true
+            window.pendingDeletionIds = ids
+            deletionExpiry.restart()
+        }
+        function onChanged() {
+            if (!messenger.actions.busy) {
+                // Successful IDs have already been confirmed; release failed or
+                // cancelled requests without ever presenting a success effect.
+                window.pendingDeletionIds = ({})
+                window.removedDeletionFrames = []
+            }
+        }
     }
     ActionSheet { id: actionSheet; parent: Overlay.overlay; reducedMotion: messenger.reduceMotion }
     Shortcut { sequence: "Escape"; enabled: window.editing && !messagePopup.opened && !profilePanel.opened && (!mediaViewerLoader.item || !mediaViewerLoader.item.visible); onActivated: window.cancelEditing() }
@@ -1602,35 +1884,26 @@ ApplicationWindow {
         }
     }
     function rememberGeometryAnchor() {
-        if (!history || window.restoringGeometry) return
+        if (!history || savedAnchor.length || requestedCmid.length) return
         const rows = visibleHistoryRows()
         if (rows.length) {
-            window.geometryAnchor = String(rows[0].item.id)
+            window.geometryAnchor = String(rows[0].item.identity || rows[0].item.id)
             window.geometryOffset = history.contentY - rows[0].y
         }
     }
     Timer { id: geometrySnapshot; interval: 40; onTriggered: window.rememberGeometryAnchor() }
     function restoreGeometryAnchor() {
-        if (!history || !messenger.connected || window.restoringGeometry) return
+        if (!history || !messenger.connected || history.moving || historyScrollBar.pressed) return
         // Width-change signals can arrive after delegates have already reflowed.
         // Use the last settled viewport, not partially updated row geometry.
-        const atEnd = window.wasAtEnd
-        const anchor = window.geometryAnchor, offset = window.geometryOffset
-        window.restoringGeometry = true
-        Qt.callLater(function() {
-            if (atEnd) window.goToEnd()
-            else if (anchor.length) {
-                history.forceLayout()
-                const i = messenger.messages.find(anchor)
-                if (i >= 0) { history.positionViewAtIndex(i, ListView.Beginning); history.contentY += offset }
-            }
-            window.restoringGeometry = false
-            geometrySnapshot.restart()
-        })
+        if (!wasAtEnd && !savedAnchor.length) {
+            savedAnchor = geometryAnchor
+            savedOffset = geometryOffset
+        }
+        Qt.callLater(window.settleHistoryViewport)
     }
     onFlatMessagesChanged: restoreGeometryAnchor()
-    onWidthChanged: { messagePopup.close(); restoreGeometryAnchor() }
-    onHeightChanged: { messagePopup.close(); restoreGeometryAnchor() }
+    onHeightChanged: messagePopup.close()
     Dialog {
         id: reactionPicker
         objectName: "reactionPicker"
@@ -1682,14 +1955,21 @@ ApplicationWindow {
     }
     AppMenu {
         id: conversationMenu
-        AppMenuItem { kind: "people"; text: "Участники"; visible: messenger.isChat; onTriggered: actionSheet.show("members", messenger.selectedPeer, [], "") }
-        AppMenuItem { kind: "add"; text: "Добавить участников"; visible: messenger.isChat; onTriggered: actionSheet.show("add", messenger.selectedPeer, [], "") }
-        AppMenuItem { kind: "edit"; text: "Переименовать беседу"; visible: messenger.isChat; onTriggered: actionSheet.show("rename", messenger.selectedPeer, [], messenger.title) }
-        AppMenuItem { kind: "photo"; text: "Фотография беседы"; visible: messenger.isChat; onTriggered: uploadFiles.choose("chat_photo") }
-        AppMenuItem { kind: "delete"; text: "Удалить фотографию"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "removePhoto") }
-        AppMenuItem { kind: "link"; text: "Ссылка-приглашение"; visible: messenger.isChat; onTriggered: actionSheet.show("invite", messenger.selectedPeer, [], "") }
+        objectName: "conversationMenu"
+        AppMenuItem {
+            objectName: "autoReplyMenuItem"; kind: "chat"
+            text: "Автоответы…"
+            available: messenger.connected && !messenger.demo
+            onTriggered: autoReplyDialog.present()
+        }
+        AppMenuItem { kind: "people"; text: "Участники"; available: messenger.isChat; onTriggered: actionSheet.show("members", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "add"; text: "Добавить участников"; available: messenger.isChat; onTriggered: actionSheet.show("add", messenger.selectedPeer, [], "") }
+        AppMenuItem { kind: "edit"; text: "Переименовать беседу"; available: messenger.isChat; onTriggered: actionSheet.show("rename", messenger.selectedPeer, [], messenger.title) }
+        AppMenuItem { kind: "photo"; text: "Фотография беседы"; available: messenger.isChat; onTriggered: uploadFiles.choose("chat_photo") }
+        AppMenuItem { kind: "delete"; text: "Удалить фотографию"; available: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "removePhoto") }
+        AppMenuItem { kind: "link"; text: "Ссылка-приглашение"; available: messenger.isChat; onTriggered: actionSheet.show("invite", messenger.selectedPeer, [], "") }
         AppMenuItem { kind: "link"; text: "Вступить по приглашению"; onTriggered: actionSheet.show("join", "", [], "") }
-        AppMenuItem { kind: "leave"; destructive: true; text: "Выйти из беседы…"; visible: messenger.isChat; onTriggered: confirmConversation.show("leave", "Выйти из беседы?") }
+        AppMenuItem { kind: "leave"; destructive: true; text: "Выйти из беседы…"; available: messenger.isChat; onTriggered: confirmConversation.show("leave", "Выйти из беседы?") }
         AppMenuSeparator {}
         AppMenuItem { kind: "select"; text: "Отметить прочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "read") }
         AppMenuItem { kind: "select"; text: "Отметить непрочитанным"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unread") }
@@ -1702,12 +1982,12 @@ ApplicationWindow {
         AppMenuSeparator {}
         AppMenuItem { kind: "muted"; text: "Выключить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "mute") }
         AppMenuItem { kind: "notifications"; text: "Включить уведомления"; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmute") }
-        AppMenuItem { kind: "muted"; text: "Выключить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "muteMentions") }
-        AppMenuItem { kind: "notifications"; text: "Включить упоминания"; visible: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmuteMentions") }
+        AppMenuItem { kind: "muted"; text: "Выключить упоминания"; available: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "muteMentions") }
+        AppMenuItem { kind: "notifications"; text: "Включить упоминания"; available: messenger.isChat; onTriggered: messenger.actions.conversationAction(messenger.selectedPeer, "unmuteMentions") }
         AppMenuItem { kind: "photo"; text: "Вложения"; onTriggered: actionSheet.show("attachments", messenger.selectedPeer, [], "") }
         AppMenuItem { kind: "pin"; text: "Открепить сообщение"; onTriggered: messenger.actions.setPinnedMessage(messenger.selectedPeer, "", false) }
         AppMenuItem { kind: "delete"; destructive: true; text: "Удалить переписку…"; onTriggered: confirmConversation.show("delete", "Удалить переписку? Это действие нельзя отменить.") }
-        AppMenuItem { kind: "settings"; text: "Инструменты разработчика"; visible: messenger.apiInspectorEnabled; onTriggered: inspector.item.openMethod("messages.getConversationsById", {}) }
+        AppMenuItem { kind: "settings"; text: "Инструменты разработчика"; available: messenger.apiInspectorEnabled; onTriggered: inspector.item.openMethod("messages.getConversationsById", {}) }
     }
     Dialog {
         id: confirmConversation
@@ -1836,6 +2116,7 @@ ApplicationWindow {
         }
     }
 
+    AutoReplyDialog { id: autoReplyDialog; theme: design }
     Dialog {
         id: notificationSettings
         objectName: "notificationSettings"
