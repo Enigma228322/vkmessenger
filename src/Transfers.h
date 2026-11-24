@@ -80,6 +80,8 @@ private:
     void save(const QJsonObject &object, quint64 generation);
     void finish(const QString &attachment);
     void fail(const QString &error);
+    void stopUploads(bool discardFiles);
+    void removeManagedFile(const QUrl &file);
     Api m_api;
     QNetworkAccessManager m_defaultNetwork;
     QNetworkAccessManager *m_network;

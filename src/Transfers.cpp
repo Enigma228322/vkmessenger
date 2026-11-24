@@ -1,4 +1,5 @@
 #include "Transfers.h"
+#include "media/ReplyFileWriter.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QHttpMultiPart>
@@ -48,7 +49,7 @@ Transfers::Transfers(Api api, QObject *parent, QNetworkAccessManager *network)
     connect(&m_progressTimer, &QTimer::timeout, this, &Transfers::progressChanged);
     connect(&m_downloadProgressTimer, &QTimer::timeout, this, &Transfers::downloadProgressChanged);
 }
-Transfers::~Transfers() { cancel(); cancelDownload(); }
+Transfers::~Transfers() { stopUploads(false); cancelDownload(); }
 
 void Transfers::upload(const QUrl &file, const QString &peer, const QString &kind)
 {
@@ -249,7 +250,7 @@ void Transfers::finish(const QString &attachment)
     if (!attachment.isEmpty()) {
         m_pending.append(QVariantMap{{"peer", m_job.peer}, {"attachment", attachment}, {"name", m_filename}, {"file", m_job.managed ? m_job.file.toString() : QString()}});
         emit pendingChanged();
-    }
+    } else if (m_job.managed) removeManagedFile(m_job.file);
     m_progressTimer.stop(); m_busy = false; m_progress = 1; m_status.clear(); emit progressChanged(); emit changed(); emit stateChanged();
     QTimer::singleShot(0, this, [this] { if (!m_busy) next(); });
 }
@@ -259,23 +260,39 @@ void Transfers::fail(const QString &error) {
     m_queue.prepend(m_job);
     emit changed();
 }
-void Transfers::cancel() {
+void Transfers::cancel() { stopUploads(true); }
+void Transfers::stopUploads(bool discardFiles) {
     const bool hadJobs = m_busy || !m_queue.isEmpty();
+    QList<QUrl> discarded;
+    if (discardFiles) {
+        if (m_busy && m_job.managed) discarded.append(m_job.file);
+        for (const auto &job : m_queue) if (job.managed) discarded.append(job.file);
+    }
     ++m_generation; m_queue.clear(); m_busy = false; m_paused = false; m_error.clear(); m_status.clear();
     m_progressTimer.stop(); m_progress = 0; m_sentBytes = 0; m_totalBytes = -1; emit progressChanged();
     if (m_stageCancelled) m_stageCancelled->store(true);
-    if (m_reply) { m_reply->disconnect(this); m_reply->abort(); m_reply->deleteLater(); } m_reply.clear(); emit changed();
+    if (m_reply) { m_reply->disconnect(this); m_reply->abort(); m_reply->deleteLater(); } m_reply.clear();
+    for (const auto &file : discarded) removeManagedFile(file);
+    emit changed();
     if (hadJobs) emit stateChanged();
 }
 void Transfers::reset() {
-    cancel(); cancelDownload();
+    // Logout and account restoration discard only the in-memory state. The
+    // persisted queue still owns its prepared files until the next login.
+    stopUploads(false); cancelDownload();
     if (!m_pending.isEmpty()) { m_pending.clear(); emit pendingChanged(); emit stateChanged(); }
     m_error.clear(); emit changed();
 }
+void Transfers::removeManagedFile(const QUrl &file) {
+    if (m_workspace.isEmpty() || !file.isLocalFile()) return;
+    const QFileInfo info(file.toLocalFile());
+    // Prepared files are direct children of the account's uploads directory.
+    // Never delete an original or follow a restored path outside that directory.
+    if (info.absolutePath() == QDir(m_workspace).absolutePath()) QFile::remove(info.absoluteFilePath());
+}
 void Transfers::remove(int index) {
     if (index < 0 || index >= m_pending.size()) return;
-    const auto file = QUrl(m_pending[index].toMap().value("file").toString()).toLocalFile();
-    if (!m_workspace.isEmpty() && file.startsWith(m_workspace + '/')) QFile::remove(file);
+    removeManagedFile(QUrl(m_pending[index].toMap().value("file").toString()));
     m_pending.removeAt(index); emit pendingChanged(); emit changed(); emit stateChanged();
 }
 QStringList Transfers::attachments(const QString &peer) const {
@@ -301,6 +318,7 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
     QNetworkRequest request(remote); request.setTransferTimeout(120000);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     auto reply = m_network->get(request); m_downloadReply = reply;
+    reply->setReadBufferSize(ReplyFileWriter::NetworkBufferSize);
     const auto generation = ++m_downloadGeneration;
     emit changed();
     connect(reply, &QNetworkReply::downloadProgress, this, [this, generation](qint64 received, qint64 total) {
@@ -312,8 +330,7 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
     });
     connect(reply, &QNetworkReply::readyRead, this, [this, reply, generation] {
         if (generation != m_downloadGeneration || !m_downloadFile) return;
-        const auto data = reply->readAll();
-        if (m_downloadFile->write(data) != data.size()) {
+        if (!ReplyFileWriter::drain(*reply, *m_downloadFile)) {
             cancelDownload(); m_downloadError = "Ошибка записи файла."; m_downloadFailed = true; emit changed();
         }
     });
@@ -322,10 +339,9 @@ void Transfers::download(const QUrl &remote, const QUrl &destination)
         if (generation != m_downloadGeneration) return;
         m_downloadReply.clear();
         m_downloadProgressTimer.stop();
-        const auto remaining = reply->readAll();
         const bool ok = reply->error() == QNetworkReply::NoError
             && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() < 400
-            && m_downloadFile && m_downloadFile->write(remaining) == remaining.size() && m_downloadFile->commit();
+            && m_downloadFile && ReplyFileWriter::drain(*reply, *m_downloadFile) && m_downloadFile->commit();
         m_downloadFailed = !ok;
         if (!ok) m_downloadError = reply->error() != QNetworkReply::NoError || reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() >= 400 ? transferError(reply) : "Не удалось сохранить файл. Проверьте свободное место.";
         m_downloadFile.reset(); emit downloadProgressChanged(); emit changed();

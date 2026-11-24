@@ -37,7 +37,7 @@ Dialog {
     Theme { id: design; dark: messenger.darkTheme }
     Binding { target: messenger.conversationChoices; property: "peopleOnly"; value: sheet.peoplePicker }
     title: ({edit: "Редактирование сообщения", delete: "Удаление сообщений", forward: "Переслать сообщения", create: "Новая беседа", add: "Добавить участников", members: "Участники беседы", rename: "Название беседы", invite: "Приглашение в беседу", join: "Вступить по приглашению", search: "Поиск сообщений", peers: "Новый диалог", important: "Важные сообщения", attachments: "Вложения переписки", reacted: "Реакции", stickers: "Стикеры"})[mode] || "Беседа"
-    background: Rectangle { radius: 18; color: sheet.palette.window; border.color: sheet.palette.mid }
+    background: GlassSurface { radius: 24; color: Qt.rgba(design.surface.r, design.surface.g, design.surface.b, 0.96); borderColor: design.glassBorder; highlightColor: design.glassHighlight; dark: design.dark; elevated: true }
     header: Label {
         text: sheet.title; color: design.ink
         leftPadding: 24; rightPadding: 24; topPadding: 20; bottomPadding: 8
@@ -52,7 +52,7 @@ Dialog {
             Item { Layout.fillWidth: true }
             Button {
                 text: "Закрыть"; implicitHeight: 40
-                background: Rectangle { radius: 8; color: parent.hovered ? design.hover : design.secondary; border.color: parent.visualFocus ? design.accent : "transparent" }
+                background: GlassSurface { radius: 12; color: parent.hovered ? design.glassSelection : design.glassInput; borderColor: parent.visualFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
                 onClicked: sheet.close()
             }
             Button {
@@ -61,8 +61,8 @@ Dialog {
                 visible: ["edit", "delete", "forward", "create", "add", "rename", "join"].indexOf(sheet.mode) >= 0
                 enabled: !sheet.controller.busy && (["forward", "create", "add"].indexOf(sheet.mode) < 0 || sheet.selectedPeers.length > 0)
                 text: ({edit: "Сохранить", delete: "Удалить", forward: "Переслать", create: "Создать беседу", add: "Добавить", rename: "Сохранить", join: "Вступить"})[sheet.mode] || "Сохранить"
-                contentItem: Text { text: parent.text; color: parent.enabled ? "white" : design.muted; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                background: Rectangle { radius: 8; color: parent.enabled ? design.accent : design.secondary; border.color: parent.visualFocus ? design.ink : "transparent" }
+                contentItem: Text { text: parent.text; color: !parent.enabled ? design.muted : design.dark ? "#102238" : "white"; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: GlassSurface { radius: 12; color: parent.enabled ? design.accent : design.glassInput; borderColor: parent.visualFocus ? design.ink : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
                 onClicked: sheet.submit()
             }
         }
@@ -143,9 +143,9 @@ Dialog {
         Accessible.selected: highlighted
         Accessible.onPressAction: sheet.activateResult(row)
         background: Rectangle {
-            radius: 12
-            color: card.highlighted ? design.selected : card.hovered ? design.hover : sheet.nativeMessageResults ? design.secondary : "transparent"
-            border.color: card.ListView.view && card.ListView.view.activeFocus && card.ListView.isCurrentItem ? design.accent : card.highlighted ? design.focusBorder : "transparent"
+            radius: 14
+            color: card.highlighted ? design.glassSelection : card.hovered ? Qt.rgba(design.accent.r, design.accent.g, design.accent.b, 0.10) : sheet.nativeMessageResults ? design.glassInput : "transparent"
+            border.color: card.ListView.view && card.ListView.view.activeFocus && card.ListView.isCurrentItem ? design.accent : card.highlighted || sheet.nativeMessageResults ? design.glassBorder : "transparent"
         }
         contentItem: ColumnLayout {
             spacing: 6
@@ -212,7 +212,7 @@ Dialog {
             wrapMode: Text.Wrap
         }
         CheckBox { id: removeForEveryone; text: "Удалить у всех"; visible: sheet.mode === "delete" && sheet.canDeleteForAll }
-        Label { Layout.fillWidth: true; visible: sheet.mode === "forward"; text: sheet.sourceText || ("Сообщений: " + sheet.cmids.length); elide: Text.ElideRight; textFormat: Text.PlainText; color: "#788697" }
+        Label { Layout.fillWidth: true; visible: sheet.mode === "forward"; text: sheet.sourceText || ("Сообщений: " + sheet.cmids.length); elide: Text.ElideRight; textFormat: Text.PlainText; color: design.muted }
         TextField {
             id: query
             objectName: "actionSearch"
@@ -222,7 +222,7 @@ Dialog {
             Accessible.name: placeholderText
             leftPadding: 38; rightPadding: text.length ? 38 : 12
             color: design.ink; placeholderTextColor: design.muted; implicitHeight: 40
-            background: Rectangle { radius: 10; color: design.secondary; border.color: query.activeFocus ? design.accent : design.divider }
+            background: GlassSurface { radius: 12; color: design.glassInput; borderColor: query.activeFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
             onTextEdited: sheet.scheduleSearch()
             onInputMethodComposingChanged: sheet.scheduleSearch()
             onAccepted: { sheet.controller.reset(); sheet.runSearch() }
@@ -240,7 +240,7 @@ Dialog {
             }
         }
         CheckBox { objectName: "searchWithinChat"; visible: sheet.mode === "search" && sheet.peer.length > 0; text: "Только в этой переписке"; checked: sheet.withinChat; onToggled: { sheet.withinChat = checked; sheet.scheduleSearch() } }
-        Label { visible: sheet.mode === "search" && sheet.controller.cachedResults; text: "Результаты из сохранённой истории"; color: "#788697" }
+        Label { visible: sheet.mode === "search" && sheet.controller.cachedResults; text: "Результаты из сохранённой истории"; color: design.muted }
         RowLayout {
             visible: sheet.mode === "attachments"
             ComboBox { model: ["Фотографии", "Видео", "Аудио", "Файлы", "Ссылки"]; onActivated: { sheet.attachmentType = ["photo", "video", "audio", "doc", "link"][currentIndex]; sheet.controller.reset(); sheet.controller.loadAttachments(sheet.peer, sheet.attachmentType) } }
@@ -258,6 +258,8 @@ Dialog {
             visible: ["edit", "forward", "create", "rename", "join"].indexOf(sheet.mode) >= 0
             wrapMode: TextEdit.Wrap
             selectByMouse: true
+            color: design.ink; placeholderTextColor: design.muted
+            background: GlassSurface { radius: 12; color: design.glassInput; borderColor: editor.activeFocus ? design.accent : design.glassBorder; highlightColor: design.glassHighlight; elevated: false; dark: design.dark }
             placeholderText: sheet.mode === "create" || sheet.mode === "rename" ? "Название беседы" : sheet.mode === "join" ? "Ссылка-приглашение" : sheet.mode === "forward" ? "Добавить комментарий" : "Сообщение"
         }
         RowLayout {
@@ -345,7 +347,7 @@ Dialog {
             }
         }
         BusyIndicator { Layout.alignment: Qt.AlignHCenter; running: sheet.controller.busy; visible: running }
-        Label { Layout.fillWidth: true; visible: sheet.controller.error.length > 0; text: sheet.controller.error; color: "#b3432a"; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+        Label { Layout.fillWidth: true; visible: sheet.controller.error.length > 0; text: sheet.controller.error; color: design.errorText; wrapMode: Text.Wrap; textFormat: Text.PlainText }
     }
     Timer {
         id: searchDelay; interval: 350

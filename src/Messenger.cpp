@@ -48,6 +48,16 @@ static QString preview(const QJsonObject &object)
     return "Сообщение";
 }
 
+static QJsonObject conversationSummary(const QJsonObject &info)
+{
+    // Histories and diff operations have already been persisted separately.
+    // The sidebar only uses conversation metadata and the first message preview;
+    // retaining the complete diff here would bypass the in-memory history limits.
+    const auto messages = info.value("message").toArray();
+    return {{"conversation", info.value("conversation")},
+        {"message", messages.isEmpty() ? QJsonArray() : QJsonArray{messages.first()}}};
+}
+
 static QString storageDirectory(const QString &overridePath)
 {
     return overridePath.isEmpty() ? QCoreApplication::instance()->property("vkmStoragePath").toString() : overridePath;
@@ -68,7 +78,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
       m_oauth(this, network), m_longPoll(this, network),
       m_transfers([this](const QString &method, Form parameters, Transfers::Result callback) {
           api(method, parameters, callback);
-      }, this, network), m_api(network)
+      }, this, network), m_api(network), m_autoReply(this, network)
 {
     m_persistentSession = persistentSession;
     m_notifications = new DesktopNotifications(*this, notificationBackend ? std::move(notificationBackend) : persistentSession ? createNotificationBackend() : nullptr, this);
@@ -145,6 +155,8 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
             return;
         }
         ++m_historyGeneration;
+        // Refreshing the same login must keep enabled chats' idle-sleep protection.
+        m_autoReply.cancelPendingRequests();
         m_api.cancel(); m_profilesLoading.clear(); m_pendingProfilePeers.clear(); m_profileTimer.stop();
         m_outboxSending = false;
         for (auto &pending : m_outgoing) if (pending.value("state").toString() == "sending") pending.insert("state", "uncertain");
@@ -161,6 +173,7 @@ Messenger::Messenger(QObject *parent, QNetworkAccessManager *network, const QStr
         m_oauth.refresh(m_session);
     });
     connect(&m_oauth, &OAuth::failed, this, [this](const QString &error) {
+        m_autoReply.setAccount({});
         m_authorizing = false;
         fail(error);
     });
@@ -264,7 +277,7 @@ void Messenger::acceptSession(QJsonObject session)
     }
     emit changed();
     m_needCredentials = true;
-    restoreAccount(session, [this] { m_transfers.resume(); scheduleSync(true, true); pumpOutbox(); openPendingLink(); });
+    restoreAccount(session, [this] { m_autoReply.setAccount(m_account); m_transfers.resume(); scheduleSync(true, true); pumpOutbox(); openPendingLink(); });
 }
 
 void Messenger::loginWithToken(const QString &token, const QString &group)
@@ -325,6 +338,7 @@ Messenger::~Messenger() { flushDrafts(); m_transfers.disconnect(this); }
 void Messenger::logout()
 {
     flushDrafts();
+    m_autoReply.setAccount({});
     ++m_generation;
     ++m_historyGeneration;
     m_oauth.cancel();
@@ -366,7 +380,7 @@ void Messenger::logout()
     emit operationChanged();
 }
 
-void Messenger::api(const QString &method, Form parameters, Callback callback)
+void Messenger::api(const QString &method, Form parameters, Callback callback, VkApiClient::Condition stillNeeded)
 {
     const auto generation = m_generation;
     if (m_syncBlocked && method.startsWith("messages.")) {
@@ -387,6 +401,7 @@ void Messenger::api(const QString &method, Form parameters, Callback callback)
         }
         if (result.methodUnavailable() && method == "messages.getConversations") {
             m_longPoll.stop(); m_syncBlocked = true;
+            m_autoReply.setAccount({});
             m_sync.stop(); m_transfers.pause();
             m_conversationsDirty = m_historyDirty = false;
             const auto reason = result.profileTypeUnavailable
@@ -399,7 +414,7 @@ void Messenger::api(const QString &method, Form parameters, Callback callback)
         }
         if (result.networkFailure) { m_offline = true; emit changed(); }
         callback(result.value, result.error);
-    });
+    }, std::move(stillNeeded));
 }
 
 void Messenger::reload()
@@ -500,6 +515,11 @@ void Messenger::loadPeerProfiles(const QStringList &peers, bool groups)
 QString Messenger::peerActivity() const
 {
     if (m_activity.contains(m_peer)) return m_activity.value(m_peer).text;
+    return peerPresence();
+}
+
+QString Messenger::peerPresence() const
+{
     if (m_online.contains(m_peer)) return m_online.value(m_peer) ? "В сети" : "Не в сети";
     return m_demo ? "Демонстрационная переписка" : "VK · Long Poll";
 }
@@ -540,7 +560,7 @@ void Messenger::applyLongPoll(const QJsonArray &events)
             if (event.type == 66) text = "Загружает видео…";
             if (event.type == 67) text = "Загружает файл…";
             if (event.type == 68) text = "Записывает видеосообщение…";
-            m_activity[event.peer] = {text, QDateTime::currentMSecsSinceEpoch() + 6000};
+            m_activity[event.peer] = {text, QDateTime::currentMSecsSinceEpoch() + 6000, event.type >= 61 && event.type <= 63};
             break;
         }
         case LongPollEvent::Presence:
@@ -586,7 +606,10 @@ void Messenger::applyLongPoll(const QJsonArray &events)
             }
             conversations = true;
             history |= event.peer.isEmpty() || event.peer == m_peer;
-            if (event.type == 4 || event.type == 10004) m_activity.remove(event.peer);
+            if (event.type == 4 || event.type == 10004) {
+                m_activity.remove(event.peer);
+                m_autoReply.invalidateNewMessage(event.peer, event.raw[1].toInteger(), event.type == 10004);
+            }
             break;
         case LongPollEvent::Unknown:
         case LongPollEvent::Invalid:
@@ -804,9 +827,10 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
             const auto peer = id(conversation.value("peer").toObject().value("id"));
             if (peer == "0") continue;
             const auto previousNotice = m_notificationHighWater.value(peer);
-            m_rawConversations[peer] = info;
+            m_rawConversations[peer] = conversationSummary(info);
             ++m_contentRevision[peer];
-            m_lastCmid[peer] = conversation.value("last_conversation_message_id").toInteger();
+            m_recentViews.remove(peer);
+            m_lastCmid[peer] = conversation.value("last_conversation_message_id").toInteger(m_lastCmid.value(peer));
             m_inRead[peer] = conversation.value("in_read_cmid").toInteger();
             m_outRead[peer] = conversation.value("out_read_cmid").toInteger();
             m_notificationHighWater[peer] = qMax(previousNotice, m_lastCmid.value(peer));
@@ -838,12 +862,15 @@ void Messenger::applyDiff(const DiffTransaction &transaction)
                 const auto object = message.toObject();
                 const auto cmid = object.value("conversation_message_id").toInteger();
                 if (cmid > 0) history[cmid] = object;
+                m_lastCmid[peer] = qMax(m_lastCmid.value(peer), cmid);
                 m_notificationHighWater[peer] = qMax(m_notificationHighWater.value(peer), cmid);
                 if (m_notificationBaseline && !muted && conversation.value("unread_count").toInt() > 0 && cmid > previousNotice && cmid > m_inRead.value(peer)
                     && object.value("out").toInt() == 0 && !object.contains("action") && !object.value("deleted").toBool() && object.value("deleted").toInt() != 1
                     && !object.value("is_silent").toBool() && object.value("is_silent").toInt() != 1 && !object.value("silent").toBool() && object.value("silent").toInt() != 1
                     && cmid > notices.value(peer).value("conversation_message_id").toInteger()) notices[peer] = object;
             }
+            const auto latest = m_lastCmid.value(peer);
+            if (m_notificationBaseline && latest > previousNotice) m_autoReply.observe(peer, latest);
             if (peer == m_peer) m_historyDirty = true;
         }
     }
@@ -959,15 +986,17 @@ void Messenger::publishHistory(bool replaceModel)
             if (!history.contains(it.key())) it = cache->erase(it); else ++it;
         }
     }
-    emit historyAboutToChange();
     const auto decorated = TimelinePresentation::decorate(rows, m_inRead.value(m_peer));
     if (!m_newer.value(m_peer) && decorated.size() > 1 && decorated.size() <= 200
         && std::none_of(decorated.cbegin(), decorated.cend(), [](const QVariant &value) { return value.toMap().value("local").toBool(); }))
         m_recentViews[m_peer] = {decorated, m_contentRevision.value(m_peer), m_inRead.value(m_peer), m_outRead.value(m_peer)};
     else m_recentViews.remove(m_peer);
-    if (replaceModel) m_messages.replace(decorated);
-    else m_messages.reconcile(decorated);
-    emit historyChanged();
+    if (m_messages.rows != decorated) {
+        emit historyAboutToChange();
+        if (replaceModel) m_messages.replace(decorated);
+        else m_messages.reconcile(decorated);
+        emit historyChanged();
+    }
     queueMissingProfiles(decorated);
 }
 
@@ -1150,7 +1179,6 @@ void Messenger::fetchHistory(bool older, bool latest, qint64 anchor, bool keepWi
         m_newer[peer] = !m_histories.value(peer).isEmpty() && m_histories.value(peer).lastKey() < m_lastCmid.value(peer);
         reconcileOutbox();
         publishHistory();
-        if (latest) emit scrollToEnd();
         if (anchor >= 0) emit scrollToMessage(QString::number(anchor));
         if (found) m_historyDirty |= !m_contentDirty.value(peer).isEmpty();
         if (m_historyDirty && !m_sync.isActive()) m_sync.start(120);
@@ -1225,8 +1253,10 @@ void Messenger::loadGap(const QString &first, const QString &last)
 void Messenger::jumpToEnd()
 {
     if (m_demo || (!hasNewer() && !m_messages.rows.isEmpty() && m_historyError.isEmpty())) { emit scrollToEnd(); return; }
-    if (m_offline && !m_loading) { m_histories[m_peer].clear(); m_verifiedRanges.remove(m_peer); readCachedHistory(m_peer); return; }
-    if (!m_loading) fetchHistory(false, true);
+    if (m_loading) return;
+    emit scrollToEnd();
+    if (m_offline) { m_histories[m_peer].clear(); m_verifiedRanges.remove(m_peer); readCachedHistory(m_peer); }
+    else fetchHistory(false, true);
 }
 
 bool Messenger::openNotification(const QString &account, const QString &peer, const QString &cmid)
@@ -1285,13 +1315,15 @@ void Messenger::sendWithOptions(const QString &text, bool silent)
     if (m_demo) {
         m_demoHistory[peer].append(QVariantMap{{"id", OAuth::randomString()}, {"text", text}, {"outgoing", true},
             {"sentAt", QDateTime::currentSecsSinceEpoch()}, {"time", QDateTime::currentDateTime().toString("dd.MM · HH:mm")}, {"sender", "Вы"}});
-        m_messages.replace(TimelinePresentation::decorate(m_demoHistory[peer]));
+        emit historyAboutToChange();
+        m_messages.reconcile(TimelinePresentation::decorate(m_demoHistory[peer]));
+        emit historyChanged();
         auto rows = m_conversations.rows;
         for (auto &row : rows) {
             auto map = row.toMap();
             if (map.value("peer").toString() == peer) { map["preview"] = text; row = map; }
         }
-        m_conversations.replace(rows);
+        m_conversations.reconcile(rows);
         emit messageSent(peer);
         return;
     }
@@ -1310,6 +1342,7 @@ void Messenger::sendWithOptions(const QString &text, bool silent)
 void Messenger::queuePayload(const QString &peer, const QString &text, const QJsonObject &options)
 {
     if (!m_connected || m_account.isEmpty() || peer.isEmpty() || text.size() > 4096) return;
+    m_autoReply.cancel(peer);
     ++m_queueWrites; m_sending = true;
     auto pending = options;
     pending.insert("local_id", "local:" + QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -1523,7 +1556,7 @@ void Messenger::restoreAccount(const QJsonObject &session, std::function<void()>
         m_actions.restoreReactionAssets(value.value("catalogs").toObject().value("reactions").toObject());
         const auto conversations = value.value("conversations").toObject();
         for (auto it = conversations.begin(); it != conversations.end(); ++it) {
-            m_rawConversations[it.key()] = it.value().toObject();
+            m_rawConversations[it.key()] = conversationSummary(it.value().toObject());
             const auto convo = it.value().toObject().value("conversation").toObject();
             m_lastCmid[it.key()] = convo.value("last_conversation_message_id").toInteger();
             m_inRead[it.key()] = convo.value("in_read_cmid").toInteger();
@@ -1617,7 +1650,6 @@ void Messenger::readCachedHistory(const QString &peer, bool older, qint64 anchor
             m_newer[peer] = !m_histories.value(peer).isEmpty() && m_histories.value(peer).lastKey() < m_lastCmid.value(peer);
             reconcileOutbox(); publishHistory();
             if (anchor >= 0) emit scrollToMessage(QString::number(anchor));
-            else if (!older && m_offline) emit scrollToEnd();
         }
         if (!error.isEmpty()) m_historyError = "Не удалось прочитать кэш: " + error;
         if (!m_offline) fetchHistory(older, !older && anchor < 0, anchor);

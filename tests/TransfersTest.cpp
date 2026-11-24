@@ -9,21 +9,23 @@
 
 class TransferReply : public QNetworkReply {
 public:
+    qint64 largestRead = 0;
     TransferReply(const QNetworkRequest &request, QByteArray data, QObject *parent, NetworkError failure = NoError, int status = 200, bool hold = false)
         : QNetworkReply(parent), m_data(std::move(data)) {
         setRequest(request); setUrl(request.url()); open(QIODevice::ReadOnly | QIODevice::Unbuffered);
         if (!hold) QTimer::singleShot(0, this, [this, failure, status] { finish(failure, status); });
     }
-    void finish(NetworkError failure = NoError, int status = 200) {
+    void finish(NetworkError failure = NoError, int status = 200, bool signalReadyRead = true) {
         if (isFinished()) return;
         setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
         if (failure != NoError) setError(failure, "https://pu.upload.test/private?hash=secret-upload-signature");
-        setFinished(true); emit readyRead(); emit finished();
+        setFinished(true); if (signalReadyRead) emit readyRead(); emit finished();
     }
     void abort() override { if (!isFinished()) { setError(OperationCanceledError, "cancelled"); setFinished(true); emit finished(); } }
     qint64 bytesAvailable() const override { return m_data.size() - m_offset + QIODevice::bytesAvailable(); }
 protected:
     qint64 readData(char *data, qint64 max) override {
+        largestRead = qMax(largestRead, max);
         const auto size = qMin(max, qint64(m_data.size() - m_offset)); if (size <= 0) return -1;
         std::memcpy(data, m_data.constData() + m_offset, size); m_offset += size; return size;
     }
@@ -54,6 +56,30 @@ protected:
 class TransfersTest : public QObject {
     Q_OBJECT
 private slots:
+    void downloadDrainsLargeReplyInBoundedChunks_data()
+    {
+        QTest::addColumn<bool>("signalReadyRead");
+        QTest::newRow("ready-read") << true;
+        QTest::newRow("remaining-at-finish") << false;
+    }
+    void downloadDrainsLargeReplyInBoundedChunks()
+    {
+        QFETCH(bool, signalReadyRead);
+        QTemporaryDir directory; TransferNetwork network;
+        network.hold = true; network.response = QByteArray(3 * 1048576 + 17, 'd');
+        Transfers transfers([](const QString &, Form, Transfers::Result) {}, nullptr, &network);
+        QSignalSpy completed(&transfers, &Transfers::downloadFinished);
+        const auto destination = QUrl::fromLocalFile(directory.filePath("large-download.bin"));
+        transfers.download(QUrl("https://cdn.test/large-download"), destination);
+        QCOMPARE(network.replies.size(), 1); const auto reply = network.replies.first(); QVERIFY(reply);
+        reply->finish(QNetworkReply::NoError, 200, signalReadyRead);
+        QCOMPARE(completed.count(), 1); QVERIFY(!transfers.downloading());
+        QVERIFY(transfers.property("downloadError").toString().isEmpty());
+        QVERIFY(reply->readBufferSize() > 0 && reply->readBufferSize() <= 256 * 1024);
+        QVERIFY(reply->largestRead <= 64 * 1024);
+        QFile file(destination.toLocalFile()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), network.response);
+    }
+
     void progressBurstsDoNotPublishMetadataOrDurableState()
     {
         QTemporaryDir directory; QFile file(directory.filePath("upload.txt"));
@@ -288,7 +314,14 @@ private slots:
             QCOMPARE(jobs.size(), 1);
             staged = QUrl(jobs.first().toObject().value("file").toString()).toLocalFile();
             QVERIFY(staged != sourcePath); QVERIFY(QFile::exists(staged));
+            transfers.pause();
+            QCOMPARE(transfers.savedState(), saved); QVERIFY(QFile::exists(staged));
+            transfers.reset();
+            QVERIFY(transfers.savedState().value("jobs").toArray().isEmpty());
+            QVERIFY(QFile::exists(staged));
+            transfers.restoreState(saved); // logout/reset must keep the persisted queue usable
         }
+        QVERIFY(QFile::exists(staged)); // destruction must preserve it as well
         QVERIFY(QFile::remove(sourcePath));
         Transfers transfers([&](const QString &method, Form, Transfers::Result result) {
             if (method == "docs.getMessagesUploadServer") result(QJsonObject{{"upload_url", "https://upload.test/file"}}, {});
@@ -303,6 +336,86 @@ private slots:
         QVERIFY(network.body.contains("draft.txt"));
         transfers.acknowledge("77", transfers.attachments("77"));
         QVERIFY(!QFile::exists(staged));
+    }
+    void cancelledQueueRemovesOnlyItsManagedCopies_data()
+    {
+        QTest::addColumn<QString>("state");
+        QTest::newRow("active") << QString("active");
+        QTest::newRow("paused") << QString("paused");
+        QTest::newRow("failed") << QString("failed");
+    }
+    void cancelledQueueRemovesOnlyItsManagedCopies()
+    {
+        QFETCH(QString, state);
+        QTemporaryDir directory;
+        const auto source = directory.filePath("original.txt");
+        QFile file(source); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("original attachment"); file.close();
+        TransferNetwork network; bool holdServer = false; Transfers::Result late;
+        Transfers transfers([&](const QString &method, Form, Transfers::Result result) {
+            if (method == "docs.getMessagesUploadServer") {
+                if (holdServer) late = result;
+                else result(QJsonObject{{"upload_url", "https://upload.test/file"}}, {});
+            } else result(QJsonObject{{"type", "doc"}, {"doc", QJsonObject{{"id", 9}, {"owner_id", 42}}}}, {});
+        }, nullptr, &network);
+        transfers.setWorkspace(directory.filePath("uploads"));
+        transfers.upload(QUrl::fromLocalFile(source), "77", "doc");
+        QTRY_COMPARE(transfers.attachments("77").size(), 1);
+        const auto draftCopy = QUrl(transfers.savedState().value("pending").toArray().first().toObject().value("file").toString()).toLocalFile();
+        QVERIFY(QFile::exists(draftCopy));
+
+        holdServer = true;
+        transfers.upload(QUrl::fromLocalFile(source), "88", "doc");
+        QTRY_VERIFY(bool(late));
+        const auto activeCopy = QUrl(transfers.savedState().value("jobs").toArray().first().toObject().value("file").toString()).toLocalFile();
+        QVERIFY(QFile::exists(activeCopy)); QVERIFY(activeCopy != draftCopy);
+        const auto recording = directory.filePath("recording.ogg");
+        QFile voice(recording); QVERIFY(voice.open(QIODevice::WriteOnly)); voice.write("OggS-voice"); voice.close();
+        QVERIFY(transfers.adoptRecording(QUrl::fromLocalFile(recording), "88"));
+        const auto voiceCopy = QUrl(transfers.savedState().value("jobs").toArray().at(1).toObject().value("file").toString()).toLocalFile();
+        QVERIFY(QFile::exists(voiceCopy));
+        transfers.upload(QUrl::fromLocalFile(source), "99", "doc"); // still belongs to the user
+        QCOMPARE(transfers.queuedCount(), 3);
+        if (state == "paused") transfers.pause();
+        else if (state == "failed") late({}, "Нет соединения");
+        transfers.cancel();
+        QVERIFY(!transfers.busy()); QVERIFY(!transfers.canRetry());
+        QVERIFY(transfers.savedState().value("jobs").toArray().isEmpty());
+        QVERIFY(!QFile::exists(activeCopy)); QVERIFY(!QFile::exists(voiceCopy));
+        QVERIFY(QFile::exists(source)); QVERIFY(QFile::exists(draftCopy));
+        QCOMPARE(transfers.attachments("77"), QStringList{"doc42_9"});
+        late(QJsonObject{{"upload_url", "https://upload.test/file"}}, {});
+        QCOMPARE(network.urls.size(), 1); // cancelled callback cannot revive the upload
+        transfers.acknowledge("77", {"doc42_9"});
+        QVERIFY(!QFile::exists(draftCopy)); QVERIFY(QFile::exists(source));
+    }
+    void chatPhotoCopySurvivesFailureAndIsRemovedAfterSuccess()
+    {
+        QTemporaryDir directory;
+        const auto source = directory.filePath("chat.png");
+        QFile file(source); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("photo-payload"); file.close();
+        TransferNetwork network; int saves = 0; QString staged; Transfers *current = nullptr;
+        Transfers transfers([&](const QString &method, Form, Transfers::Result result) {
+            if (method == "photos.getChatUploadServer") {
+                const auto path = QUrl(current->savedState().value("jobs").toArray().first().toObject().value("file").toString()).toLocalFile();
+                if (staged.isEmpty()) staged = path;
+                else QCOMPARE(path, staged);
+                result(QJsonObject{{"upload_url", "https://upload.test/photo"}}, {});
+            } else {
+                QCOMPARE(method, QString("messages.setChatPhoto"));
+                if (++saves == 1) result({}, "Не удалось установить фотографию");
+                else result(QJsonObject{{"message_id", 123}}, {});
+            }
+        }, nullptr, &network);
+        current = &transfers; transfers.setWorkspace(directory.filePath("uploads"));
+        QSignalSpy changed(&transfers, &Transfers::chatPhotoChanged);
+        transfers.upload(QUrl::fromLocalFile(source), "2000000001", "chat_photo");
+        QTRY_VERIFY(transfers.uploadCanRetry());
+        QVERIFY(QFile::exists(staged)); QCOMPARE(changed.count(), 0);
+        transfers.retryUpload();
+        QTRY_COMPARE(changed.count(), 1);
+        QVERIFY(!transfers.busy()); QCOMPARE(transfers.queuedCount(), 0);
+        QVERIFY(!QFile::exists(staged)); QVERIFY(QFile::exists(source));
+        QVERIFY(transfers.savedState().value("pending").toArray().isEmpty());
     }
     void voiceUploadUsesDocumentAttachmentAndKeepsPeerIsolation()
     {

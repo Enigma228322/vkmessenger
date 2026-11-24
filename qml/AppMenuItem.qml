@@ -5,8 +5,11 @@ MenuItem {
     id: entry
     property string kind: ""
     property bool destructive: false
+    property bool available: true
+    visible: available
+    enabled: available
     hoverEnabled: true
-    implicitHeight: 42
+    implicitHeight: available ? 42 : 0
     leftPadding: kind.length ? 44 : 14
     rightPadding: 14
     font.pixelSize: 14

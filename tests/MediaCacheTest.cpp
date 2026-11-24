@@ -9,9 +9,15 @@
 
 class AssetReply : public QNetworkReply {
 public:
-    AssetReply(const QNetworkRequest &request, QByteArray content, QObject *parent) : QNetworkReply(parent), m_content(std::move(content)) {
+    AssetReply(const QNetworkRequest &request, QByteArray content, QObject *parent, bool hold = false) : QNetworkReply(parent), m_content(std::move(content)) {
         setRequest(request); setUrl(request.url()); open(QIODevice::ReadOnly | QIODevice::Unbuffered);
-        QTimer::singleShot(0, this, [this] { setAttribute(QNetworkRequest::HttpStatusCodeAttribute, 200); setFinished(true); emit readyRead(); emit finished(); });
+        if (!hold) QTimer::singleShot(0, this, [this] { finish(); });
+    }
+    void finish(bool signalReadyRead = true) {
+        if (isFinished()) return;
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, 200); setFinished(true);
+        if (signalReadyRead) emit readyRead();
+        emit finished();
     }
     void abort() override { if (isFinished()) return; setError(OperationCanceledError, "cancelled"); setFinished(true); emit finished(); }
     qint64 bytesAvailable() const override { return m_content.size() - m_offset + QIODevice::bytesAvailable(); }
@@ -25,8 +31,45 @@ class AssetNetwork : public QNetworkAccessManager {
 public:
     int requests = 0;
     QByteArray content = "fixture-content";
+    bool hold = false;
+    QList<QPointer<AssetReply>> replies;
 protected:
-    QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override { ++requests; return new AssetReply(request, content, this); }
+    QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override {
+        ++requests; auto reply = new AssetReply(request, content, this, hold); replies.append(reply); return reply;
+    }
+};
+
+// Generate a large reply on demand, without allocating a payload-sized fixture.
+// This isolates the consumer's temporary buffers from the test's own memory use.
+class GeneratedAssetReply : public QNetworkReply {
+public:
+    static constexpr qint64 PayloadSize = 96 * 1048576;
+    qint64 largestRead = 0, consumed = 0;
+    explicit GeneratedAssetReply(const QNetworkRequest &request, QObject *parent) : QNetworkReply(parent) {
+        setRequest(request); setUrl(request.url()); open(QIODevice::ReadOnly | QIODevice::Unbuffered);
+    }
+    void finish(bool readyReadFirst) {
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, 200); setFinished(true);
+        if (readyReadFirst) emit readyRead();
+        emit finished();
+    }
+    void abort() override { setError(OperationCanceledError, "cancelled"); setFinished(true); emit finished(); }
+    qint64 bytesAvailable() const override { return PayloadSize - consumed + QIODevice::bytesAvailable(); }
+protected:
+    qint64 readData(char *data, qint64 maximum) override {
+        largestRead = qMax(largestRead, maximum);
+        const auto count = qMin(maximum, PayloadSize - consumed);
+        if (count <= 0) return -1;
+        std::memset(data, 'm', size_t(count)); consumed += count; return count;
+    }
+};
+class GeneratedAssetNetwork : public QNetworkAccessManager {
+public:
+    QPointer<GeneratedAssetReply> reply;
+protected:
+    QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override {
+        reply = new GeneratedAssetReply(request, this); return reply;
+    }
 };
 
 class MediaCacheTest : public QObject {
@@ -57,6 +100,31 @@ private slots:
         MediaCache cache(directory.path(), nullptr, &network);
         cache.setAccount("user:1"); QCOMPARE(cache.source(url), first); QCOMPARE(network.requests, 2);
         QVERIFY(cache.source(QUrl("file:///etc/passwd")).isEmpty());
+    }
+    void largeReplyUsesBoundedBuffers_data()
+    {
+        QTest::addColumn<bool>("readyReadFirst");
+        QTest::newRow("ready-read") << true;
+        QTest::newRow("finish") << false;
+    }
+    void largeReplyUsesBoundedBuffers()
+    {
+        QFETCH(bool, readyReadFirst);
+        QTemporaryDir directory; GeneratedAssetNetwork network;
+        MediaCache cache(directory.path(), nullptr, &network);
+        cache.setLimit(128 * 1048576); cache.setAccount("user:bounded-memory");
+        const QUrl url("https://assets.test/generated-large-file");
+        cache.source(url); QTRY_VERIFY(network.reply);
+        network.reply->finish(readyReadFirst);
+        QVERIFY(!cache.cached(url).isEmpty()); QCOMPARE(cache.pending(), 0);
+        QCOMPARE(cache.bytes(), GeneratedAssetReply::PayloadSize);
+        QFile file(cache.cached(url).toLocalFile()); QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.size(), GeneratedAssetReply::PayloadSize);
+        const QByteArray block(64 * 1024, 'm');
+        while (!file.atEnd()) QCOMPARE(file.read(block.size()), block);
+        qInfo() << "largest device read:" << network.reply->largestRead << "bytes";
+        QVERIFY2(network.reply->largestRead <= 64 * 1024, "A large reply must not allocate a payload-sized read buffer");
+        QVERIFY(network.reply->readBufferSize() > 0 && network.reply->readBufferSize() <= 256 * 1024);
     }
     void assetNotificationsAreScopedAndResetOnAccountChanges()
     {
@@ -119,6 +187,36 @@ private slots:
         network.content = "replacement-image"; cache.retry(url);
         QTRY_COMPARE(network.requests, 2); QTRY_VERIFY(!cache.cached(url).isEmpty());
         QFile file(cache.cached(url).toLocalFile()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), network.content);
+    }
+    void loweredBudgetRejectsInFlightDownloadWithoutReloadLoop_data()
+    {
+        QTest::addColumn<bool>("signalReadyRead");
+        QTest::newRow("ready-read") << true;
+        QTest::newRow("remaining-at-finish") << false;
+    }
+    void loweredBudgetRejectsInFlightDownloadWithoutReloadLoop()
+    {
+        QFETCH(bool, signalReadyRead);
+        QTemporaryDir directory; AssetNetwork network;
+        network.hold = true; network.content = QByteArray(65 * 1048576, 'a');
+        MediaCache cache(directory.path(), nullptr, &network);
+        cache.setLimit(128 * 1048576); cache.setAccount("user:1");
+        const QUrl url("https://assets.test/large-image");
+        // Visible images ask for their source again whenever this notification arrives.
+        connect(&cache, &MediaCache::sourceUpdated, &cache, [&](const QUrl &remote) { cache.source(remote); });
+        cache.source(url); QTRY_COMPARE(network.requests, 1); QCOMPARE(cache.pending(), 1);
+        cache.setLimit(64 * 1048576);
+        network.replies.first()->finish(signalReadyRead);
+        QVERIFY(cache.cached(url).isEmpty()); QVERIFY(!cache.error(url).isEmpty());
+        QCOMPARE(cache.pending(), 0); QCOMPARE(cache.bytes(), 0);
+        QTest::qWait(20); QCOMPARE(network.requests, 1);
+
+        cache.setLimit(128 * 1048576); cache.retry(url);
+        QTRY_COMPARE(network.requests, 2); network.replies.last()->finish(signalReadyRead);
+        QVERIFY(cache.error(url).isEmpty()); QVERIFY(!cache.cached(url).isEmpty());
+        QCOMPARE(cache.pending(), 0); QCOMPARE(cache.bytes(), qint64(network.content.size()));
+        QFile file(cache.cached(url).toLocalFile()); QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), network.content);
     }
     void byteBudgetEvictsOlderFiles()
     {

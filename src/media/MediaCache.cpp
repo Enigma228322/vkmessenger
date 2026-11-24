@@ -1,4 +1,5 @@
 #include "MediaCache.h"
+#include "ReplyFileWriter.h"
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -82,21 +83,24 @@ void MediaCache::pump()
         QNetworkRequest request(remote); request.setTransferTimeout(30000);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         auto reply = m_network->get(request); m_active[remote] = reply;
+        reply->setReadBufferSize(ReplyFileWriter::NetworkBufferSize);
         auto failed = std::make_shared<bool>(false);
-        const auto maximum = qMin(m_limit, qint64(128 * 1048576));
-        connect(reply, &QNetworkReply::readyRead, this, [this, generation, file, reply, failed, maximum] {
+        connect(reply, &QNetworkReply::readyRead, this, [this, generation, file, reply, failed] {
             if (generation != m_generation) return;
-            const auto data = reply->readAll();
-            if (file->size() + data.size() > maximum || file->write(data) != data.size()) { *failed = true; reply->abort(); }
+            const auto maximum = qMin(m_limit, qint64(128 * 1048576));
+            if (!ReplyFileWriter::drain(*reply, *file, maximum - file->size())) { *failed = true; reply->abort(); }
         });
-        connect(reply, &QNetworkReply::finished, this, [this, generation, remote, filePath, file, reply, failed, maximum] {
+        connect(reply, &QNetworkReply::finished, this, [this, generation, remote, filePath, file, reply, failed] {
             reply->deleteLater();
             if (generation != m_generation) return;
             m_active.remove(remote); m_waiting.remove(remote);
-            const auto remaining = reply->readAll();
             const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            // A smaller budget may have been selected while this request was in flight.
+            // Reject oversized files before committing, or trim() would delete the new
+            // source and visible images would immediately enqueue the same download.
+            const auto maximum = qMin(m_limit, qint64(128 * 1048576));
             const bool success = !*failed && reply->error() == QNetworkReply::NoError && status >= 200 && status < 300
-                && file->size() + remaining.size() <= maximum && file->write(remaining) == remaining.size() && file->commit();
+                && ReplyFileWriter::drain(*reply, *file, maximum - file->size()) && file->commit();
             if (success) {
                 QFile::setPermissions(filePath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
                 const auto size = QFileInfo(filePath).size();

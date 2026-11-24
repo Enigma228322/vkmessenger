@@ -155,10 +155,12 @@ Column {
                     id: raster
                     objectName: "attachmentImage"
                     anchors.fill: parent
-                    source: imageFrame.rasterLocal
+                    // The raster is only a loading/error fallback for Lottie.
+                    // Hiding it alone keeps a second decoded image alive.
+                    source: animation.ready ? "" : imageFrame.rasterLocal
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
-                    cache: !root.rasterAnimation(row.modelData)
+                    cache: !root.rasterAnimation(row.modelData) && !imageFrame.lottieRemote.toString().length
                     sourceSize.width: imageFrame.sticker ? 416 : 1120
                     sourceSize.height: imageFrame.sticker ? 416 : 1040
                     playing: frameCount > 1 && root.animationsEnabled && root.loadImages && !imageFrame.paused

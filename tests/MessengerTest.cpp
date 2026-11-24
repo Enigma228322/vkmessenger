@@ -39,9 +39,17 @@
 
 // Integration tests never read or change the user's macOS Keychain.
 static QByteArray savedSession;
-QByteArray Keychain::read() { return savedSession; }
-bool Keychain::write(const QByteArray &value) { savedSession = value; return true; }
-void Keychain::clear() { savedSession.clear(); }
+static QHash<QByteArray, QByteArray> savedKeys;
+static bool refuseKeyWrite = false;
+QByteArray Keychain::read(const QByteArray &account) { return account == "vk-session" ? savedSession : savedKeys.value(account); }
+bool Keychain::write(const QByteArray &value, const QByteArray &account) {
+    if (refuseKeyWrite && account != "vk-session") return false;
+    if (account == "vk-session") savedSession = value; else savedKeys[account] = value;
+    return true;
+}
+void Keychain::clear(const QByteArray &account) {
+    if (account == "vk-session") savedSession.clear(); else savedKeys.remove(account);
+}
 
 class TokenReply : public QNetworkReply {
 public:
@@ -53,11 +61,11 @@ public:
         open(QIODevice::ReadOnly | QIODevice::Unbuffered);
         if (!body.isEmpty()) QTimer::singleShot(0, this, [this] { deliver(m_body); });
     }
-    void deliver(QByteArray body) {
+    void deliver(QByteArray body, int status = 200) {
         if (isFinished()) return;
         m_body = std::move(body); m_offset = 0;
         if (m_body == "#offline") setError(QNetworkReply::ConnectionRefusedError, "offline");
-        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, 200);
+        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
         setFinished(true); emit readyRead(); emit finished();
     }
     void abort() override {
@@ -139,12 +147,21 @@ class MessengerTest : public QObject {
     QTemporaryDir m_storage;
 private slots:
     void init() {
-        savedSession.clear();
+        savedSession.clear(); savedKeys.clear(); refuseKeyWrite = false;
         QDir(m_storage.path()).removeRecursively();
         QCoreApplication::instance()->setProperty("vkmStoragePath", m_storage.path());
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_storage.path() + "/settings");
     }
+
+    void autoRepliesUseOnlyChatHistoryAndCurrentNotes_data();
+    void autoRepliesUseOnlyChatHistoryAndCurrentNotes();
+    void autoReplyToggleAndChatNotes();
+    void autoReplyStaysActiveDuringSessionRefresh();
+    void autoReplyChecksModelAccess();
+    void autoReplyRemembersPolzaTokenAcrossRestarts();
+    void autoReplyMigratesOtherProviders();
+    void conversationMenuCollapsesUnavailableActions();
 
     void notificationsIgnoreInitialHistoryDuplicatesMutedAndReadMessages()
     {
@@ -1786,6 +1803,80 @@ private slots:
         QTRY_VERIFY(!popup->property("opened").toBool());
     }
 
+    void messagePopupKeyboardKeepsFocusVisibleAndTogglesReaction()
+    {
+        Messenger messenger; messenger.startDemo();
+        QJsonArray reactions;
+        for (int id = 1; id <= 40; ++id)
+            reactions.append(QJsonObject{{"reaction_id", id}, {"links", QJsonObject{{"static", ""}}}});
+        messenger.actions()->cacheReactionAssets(QJsonObject{{"assets", reactions}});
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        window->resize(780, 560); window->requestActivate(); QTRY_VERIFY(window->isActive());
+        auto popup = window->findChild<QObject *>("messageActionPopup"); QVERIFY(popup);
+        popup->setProperty("reduceMotion", true);
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        auto composer = window->findChild<QQuickItem *>("composer"); QVERIFY(composer);
+        const auto find = [&](const QString &name) {
+            QQuickItem *result = nullptr;
+            const auto visit = [&](auto &&self, QQuickItem *item) -> void {
+                if (!result && item->objectName() == name) result = item;
+                for (auto child : item->childItems()) self(self, child);
+            };
+            visit(visit, window->contentItem()); return result;
+        };
+        const QVariantMap message{{"id", "1"}, {"outgoing", true},
+            {"raw", QVariantMap{{"text", "Текст с клавиатуры & <tag>"}, {"reaction_id", 1}}}};
+        const auto show = [&](const QVariantMap &value) {
+            composer->forceActiveFocus();
+            return QMetaObject::invokeMethod(popup, "showAt", Q_ARG(QVariant, QVariant::fromValue(history)),
+                Q_ARG(QVariant, value), Q_ARG(QVariant, QVariant::fromValue(composer)));
+        };
+        QVERIFY(show(message)); QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_VERIFY(find("messageAction_reply") && find("messageAction_reply")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Down); QTest::keyClick(window, Qt::Key_Down); QTest::keyClick(window, Qt::Key_Down);
+        QTRY_VERIFY(find("messageAction_copy")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), message.value("raw").toMap().value("text").toString());
+        QTRY_VERIFY(!popup->property("opened").toBool()); QTRY_VERIFY(composer->hasActiveFocus());
+
+        QVERIFY(show(message)); QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_VERIFY(find("messageAction_reply")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Up);
+        auto more = find("messageActionMoreReactions"); QVERIFY(more); QTRY_VERIFY(more->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Space); QTRY_VERIFY(popup->property("expanded").toBool());
+        QTRY_VERIFY(more->hasActiveFocus());
+        auto scroller = find("messageActionScroll"); QVERIFY(scroller);
+        QTRY_VERIFY(scroller->property("contentHeight").toReal() > scroller->height());
+        QTest::keyClick(window, Qt::Key_End);
+        auto last = find("messageAction_link"); QVERIFY(last); QTRY_VERIFY(last->hasActiveFocus());
+        QTRY_VERIFY(scroller->property("contentY").toReal() > 0);
+        const auto position = last->mapToItem(scroller, QPointF());
+        QVERIFY(position.y() >= -1); QVERIFY(position.y() + last->height() <= scroller->height() + 1);
+        QTest::keyClick(window, Qt::Key_Tab);
+        auto firstReaction = find("quickReaction"); QVERIFY(firstReaction); QTRY_VERIFY(firstReaction->hasActiveFocus());
+        QTRY_COMPARE(scroller->property("contentY").toReal(), 0.0);
+        QTest::keyClick(window, Qt::Key_Backtab); QTRY_VERIFY(last->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Home); QTRY_VERIFY(firstReaction->hasActiveFocus());
+        auto accessible = QAccessible::queryAccessibleInterface(firstReaction); QVERIFY(accessible);
+        QCOMPARE(accessible->text(QAccessible::Name), QString("Убрать реакцию 1"));
+        QVERIFY(accessible->state().checkable); QVERIFY(accessible->state().checked);
+        QSignalSpy commands(popup, SIGNAL(command(QString)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(commands.count(), 1); QCOMPARE(commands.first().first().toString(), "reaction:0");
+        QTRY_VERIFY(!popup->property("opened").toBool()); QTRY_VERIFY(composer->hasActiveFocus());
+
+        QVERIFY(show(QVariantMap{{"id", "local"}, {"local", true}, {"delivery", "failed"}, {"text", "Черновик"}}));
+        QTRY_VERIFY(popup->property("opened").toBool()); QTRY_VERIFY(find("messageAction_copy")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Up); QTRY_VERIFY(find("messageAction_cancel")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab); QTRY_VERIFY(find("messageAction_copy")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!popup->property("opened").toBool()); QTRY_VERIFY(composer->hasActiveFocus());
+        QCOMPARE(commands.count(), 1); QCOMPARE(warnings.count(), 0);
+    }
+
     void inlineEditingKeepsDraftOnFailureCancelAndSuccess()
     {
         TokenNetwork network;
@@ -1799,12 +1890,28 @@ private slots:
         auto root = engine.rootObjects().first();
         messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
         messenger.selectConversation("77", "Тестовый диалог"); QTRY_COMPARE(messenger.messages()->rowCount(), 1);
-        messenger.setDraftText("77", "Мой черновик");
         auto composer = root->findChild<QObject *>("composer"); QVERIFY(composer);
         const auto edit = [&] { return QMetaObject::invokeMethod(root, "messageActions", Q_ARG(QVariant, "edit"), Q_ARG(QVariant, messenger.messages()->get(0))); };
-        QVERIFY(edit());
+        auto window = qobject_cast<QQuickWindow *>(root); QVERIFY(window);
+        auto input = qobject_cast<QQuickItem *>(composer); QVERIFY(input);
+        input->forceActiveFocus();
+        composer->setProperty("text", "Мой черновик");
+        QTest::keyClick(window, Qt::Key_Up);
+        QVERIFY(root->property("editingMessage").toString().isEmpty());
+        composer->setProperty("text", "");
+        auto rows = messenger.messages()->rows;
+        rows.append(QVariantMap{{"id", "2"}, {"outgoing", false}, {"text", "Входящее"}});
+        rows.append(QVariantMap{{"id", "3"}, {"outgoing", true}, {"local", true}, {"text", "В очереди"}});
+        rows.append(QVariantMap{{"id", "4"}, {"outgoing", true}, {"attachments", QVariantList{QVariantMap{{"type", "sticker"}}}}});
+        messenger.messages()->reconcile(rows);
+        QTest::keyClick(window, Qt::Key_Up, Qt::ShiftModifier);
+        QVERIFY(root->property("editingMessage").toString().isEmpty());
+        QTest::keyClick(window, Qt::Key_Up);
         QCOMPARE(root->property("editingMessage").toString(), QString("1"));
         QCOMPARE(composer->property("text").toString(), QString("Исходное сообщение"));
+        QVERIFY(QMetaObject::invokeMethod(root, "cancelEditing"));
+        messenger.setDraftText("77", "Мой черновик");
+        QVERIFY(edit());
         composer->setProperty("text", "Исправленный текст");
         QCOMPARE(messenger.draftText(), QString("Мой черновик"));
         QVERIFY(QMetaObject::invokeMethod(root, "cancelEditing"));
@@ -2128,6 +2235,68 @@ private slots:
         QCOMPARE(sourceChanges.count(), 0);
     }
 
+    void lottieReleasesDecodedRasterFallbackAndRestoresItOnError()
+    {
+        QImage image(416, 416, QImage::Format_ARGB32_Premultiplied); image.fill(QColor(45, 120, 200, 200));
+        QByteArray png; QBuffer buffer(&png); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+        QFile fixture(QFINDTESTDATA("fixtures/sticker.json")); QVERIFY(fixture.open(QIODevice::ReadOnly));
+        const auto lottieBytes = fixture.readAll();
+        const QUrl lottieRemote("https://assets.test/dual-lottie");
+        TokenNetwork network; network.responses["dual-raster"] = {png}; network.responses["static-raster"] = {png};
+        Messenger messenger(nullptr, &network); messenger.startDemo();
+        QQmlEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFileInfo(QStringLiteral(NATIVE_QML_PATH)).dir().filePath("AttachmentView.qml")));
+        const QVariantList attachments{
+            QVariantMap{{"type", "sticker"}, {"sticker", QVariantMap{{"animation_url", lottieRemote.toString()},
+                {"images", QVariantList{QVariantMap{{"url", "https://assets.test/dual-raster"}}}}}}},
+            QVariantMap{{"type", "sticker"}, {"sticker", QVariantMap{
+                {"images", QVariantList{QVariantMap{{"url", "https://assets.test/static-raster"}}}}}}}
+        };
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({{"attachments", attachments}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto view = qobject_cast<QQuickItem *>(object.get()); QVERIFY(view);
+        QQuickWindow window; view->setParentItem(window.contentItem()); view->setWidth(400); view->setHeight(440); window.resize(400, 440); window.show();
+        QList<QQuickItem *> rasters; QList<LottieSticker *> animations;
+        const auto visit = [&](auto &&self, QQuickItem *item) -> void {
+            if (item->objectName() == "attachmentImage") rasters.append(item);
+            if (auto animation = qobject_cast<LottieSticker *>(item)) animations.append(animation);
+            for (auto child : item->childItems()) self(self, child);
+        };
+        visit(visit, view); QCOMPARE(rasters.size(), 2); QCOMPARE(animations.size(), 2);
+        auto fallback = rasters.first(); auto animation = animations.first();
+        QTRY_COMPARE(fallback->property("status").toInt(), 1); // Image.Ready while Lottie is loading
+        QTRY_COMPARE(rasters.last()->property("status").toInt(), 1);
+        QCOMPARE(fallback->property("sourceSize").toSize(), QSize(416, 416));
+        QCOMPARE(QSizeF(fallback->implicitWidth(), fallback->implicitHeight()), QSizeF(416, 416));
+        qInfo() << "Decoded Lottie fallback:" << fallback->property("sourceSize").toSize()
+                << "pixels; released RGBA payload:" << 416 * 416 * 4 << "bytes per ready sticker";
+        QVERIFY(!fallback->property("cache").toBool()); QVERIFY(rasters.last()->property("cache").toBool());
+        QVERIFY(!animation->ready());
+        QTRY_COMPARE(network.replies["dual-lottie"].size(), 1);
+        network.replies["dual-lottie"].first()->deliver(lottieBytes);
+        QTRY_VERIFY(animation->ready());
+        QTRY_VERIFY(fallback->property("source").toUrl().isEmpty());
+        QTRY_COMPARE(fallback->property("status").toInt(), 0); // Image.Null releases its decoded pixels
+        QVERIFY(animation->ready()); QVERIFY(!animation->snapshot().isNull());
+        QCOMPARE(rasters.last()->property("status").toInt(), 1); QVERIFY(!rasters.last()->property("source").toUrl().isEmpty());
+
+        // A damaged replacement animation must still recover to the static image.
+        network.responses["dual-lottie"] = {"invalid-lottie"};
+        messenger.media()->retry(lottieRemote);
+        QTRY_VERIFY(!animation->error().isEmpty()); QVERIFY(!animation->ready());
+        QTRY_COMPARE(fallback->property("status").toInt(), 1);
+        QVERIFY(!fallback->property("source").toUrl().isEmpty()); QVERIFY(fallback->isVisible());
+        QCOMPARE(network.replies["dual-raster"].size(), 1); // fallback is read from disk, not downloaded again
+        network.responses["dual-lottie"] = {lottieBytes};
+        messenger.media()->retry(lottieRemote);
+        QTRY_VERIFY(animation->ready());
+        QTRY_VERIFY(fallback->property("source").toUrl().isEmpty()); QTRY_COMPARE(fallback->property("status").toInt(), 0);
+        QCOMPARE(network.replies["dual-raster"].size(), 1); QCOMPARE(network.replies["static-raster"].size(), 1);
+        view->setProperty("loadImages", false);
+        for (auto raster : rasters) { QVERIFY(raster->property("source").toUrl().isEmpty()); QCOMPARE(raster->property("status").toInt(), 0); }
+        QVERIFY(animation->source().isEmpty()); QVERIFY(animation->snapshot().isNull());
+    }
+
     void personalProfileShowsIdentityAndClosesOnPeerChange()
     {
         TokenNetwork network;
@@ -2181,9 +2350,9 @@ private slots:
             QTest::mouseMove(window, center);
             QTRY_VERIFY(item->property("highlighted").toBool());
             auto background = item->property("background").value<QQuickItem *>(); QVERIFY(background);
-            QTRY_COMPARE(background->property("color").value<QColor>(), QColor(dark ? "#2c2c2c" : "#f0f2f5"));
+            QTRY_COMPARE(background->property("color").value<QColor>(), window->property("secondarySurface").value<QColor>());
             auto label = item->property("contentItem").value<QQuickItem *>(); QVERIFY(label);
-            QCOMPARE(label->property("color").value<QColor>(), QColor(dark ? "#e1e3e6" : "#222222"));
+            QCOMPARE(label->property("color").value<QColor>(), window->property("ink").value<QColor>());
             if (qEnvironmentVariableIsSet("VKM_MENU_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_MENU_SCREENSHOT") + (dark ? "-dark.png" : "-light.png")));
             QTest::keyClick(window, Qt::Key_Down);
             QCOMPARE(menu->property("currentIndex").toInt(), 2);
@@ -2802,6 +2971,106 @@ private slots:
         QVERIFY(!resetSizes.contains(0));
         qInfo() << "Warm chat model ready synchronously in" << timer.elapsed() << "ms";
         messenger.logout(); QVERIFY(messenger.messages()->rows.isEmpty());
+    }
+
+    void conversationSummariesReleaseDiffPayloadAndKeepDiskHistory()
+    {
+        constexpr int peerCount = 12, messageCount = 200;
+        const auto textFor = [](int peer, int cmid) {
+            return QString("Чат %1 · сообщение %2 · ").arg(peer).arg(cmid) + QString(512, QChar('x'));
+        };
+        QJsonArray conversations;
+        qint64 completePayloadBytes = 0;
+        for (int peer = 77; peer < 77 + peerCount; ++peer) {
+            QJsonArray messages;
+            for (int cmid = messageCount; cmid > 0; --cmid)
+                messages.append(QJsonObject{{"id", peer * 1000 + cmid}, {"conversation_message_id", cmid},
+                    {"peer_id", peer}, {"from_id", peer}, {"date", 1700000000 + cmid}, {"text", textFor(peer, cmid)}});
+            const QJsonObject info{
+                {"conversation", QJsonObject{{"peer", QJsonObject{{"id", peer}}}, {"last_conversation_message_id", messageCount},
+                    {"unread_count", 7}, {"important", true}, {"can_write", QJsonObject{{"allowed", false}}},
+                    {"push_settings", QJsonObject{{"disabled_forever", true}}}}},
+                {"message", messages}, {"invalidate", false},
+                {"cmids_flags", QJsonArray{QJsonObject{{"cmid", 99999}, {"updated_flags", 1}}}},
+                {"range_deleted_cmids", QJsonArray{QJsonObject{{"min", 99999}, {"max", 100000}}}}};
+            completePayloadBytes += QJsonDocument(info).toJson(QJsonDocument::Compact).size();
+            conversations.append(info);
+        }
+        {
+            TokenNetwork network;
+            network.responses["messages.getDiff"] = {QJsonDocument(QJsonObject{{"response", QJsonObject{
+                {"server_version", "500"}, {"credentials", QJsonObject{{"server_lp", "lp.test/im"}, {"key", "key"}, {"ts", "100"}}},
+                {"conversations_info", conversations}}}}).toJson(QJsonDocument::Compact)};
+            Messenger messenger(nullptr, &network);
+            messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), peerCount);
+            qint64 retainedPayloadBytes = 0;
+            for (const auto &info : messenger.m_rawConversations) {
+                QCOMPARE(info.keys(), (QStringList{"conversation", "message"}));
+                QCOMPARE(info.value("message").toArray().size(), 1);
+                retainedPayloadBytes += QJsonDocument(info).toJson(QJsonDocument::Compact).size();
+            }
+            for (const auto &history : messenger.m_histories) QCOMPARE(history.size(), 1);
+            QVERIFY(retainedPayloadBytes < completePayloadBytes / 100);
+            qInfo() << "Conversation JSON payload bytes before compaction:" << completePayloadBytes
+                    << "retained in sidebar:" << retainedPayloadBytes;
+            const auto row = messenger.conversations()->get(messenger.conversations()->find("77"));
+            QCOMPARE(row.value("preview").toString(), textFor(77, messageCount));
+            QCOMPARE(row.value("unread").toInt(), 7); QVERIFY(row.value("muted").toBool());
+            QVERIFY(row.value("important").toBool()); QVERIFY(!row.value("canWrite").toBool());
+
+            messenger.selectConversation("77", "Первый чат");
+            // The inactive in-memory history contains only one message. All 200
+            // rows must now come from SQLite; getDiffContent has no fake response.
+            QTRY_COMPARE(messenger.messages()->rowCount(), messageCount);
+            QCOMPARE(messenger.messages()->get(0).value("text").toString(), textFor(77, 1));
+            QCOMPARE(messenger.messages()->get(messageCount - 1).value("text").toString(), textFor(77, messageCount));
+            messenger.setDraftText("77", "Сохранённый черновик");
+            messenger.selectConversation("78", "Второй чат");
+            QTRY_COMPARE(messenger.messages()->rowCount(), messageCount);
+            messenger.selectConversation("77", "Первый чат");
+            QCOMPARE(messenger.messages()->rowCount(), messageCount); // still a synchronous warm return
+            QCOMPARE(messenger.draftText(), QString("Сохранённый черновик"));
+        }
+        {
+            TokenNetwork network; network.response = "#offline";
+            Messenger messenger(nullptr, &network);
+            QTRY_VERIFY(messenger.connected()); QTRY_VERIFY(!messenger.authorizing()); QVERIFY(messenger.offline());
+            QCOMPARE(messenger.m_rawConversations.size(), peerCount);
+            for (const auto &info : messenger.m_rawConversations) {
+                QCOMPARE(info.keys(), (QStringList{"conversation", "message"}));
+                QCOMPARE(info.value("message").toArray().size(), 1);
+            }
+            messenger.selectConversation("77", "Первый чат");
+            QTRY_COMPARE(messenger.messages()->rowCount(), messageCount);
+            QCOMPARE(messenger.messages()->get(0).value("text").toString(), textFor(77, 1));
+            QCOMPARE(messenger.messages()->get(messageCount - 1).value("text").toString(), textFor(77, messageCount));
+            QCOMPARE(messenger.draftText(), QString("Сохранённый черновик"));
+        }
+    }
+
+    void inactiveChatDropsStalePresentationAfterDiff()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":2},"message":[{"id":901,"conversation_message_id":2,"peer_id":77,"text":"Second"},{"id":900,"conversation_message_id":1,"peer_id":77,"text":"First"}]},{"conversation":{"peer":{"id":88},"last_conversation_message_id":1},"message":[{"conversation_message_id":1,"peer_id":88,"text":"Other"}]}]}})"};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 2);
+        messenger.selectConversation("77", "Первый чат"); QTRY_COMPARE(messenger.messages()->rowCount(), 2);
+        QVERIFY(messenger.m_recentViews.contains("77"));
+        messenger.setDraftText("77", "Черновик");
+        messenger.selectConversation("88", "Второй чат");
+        QVERIFY(messenger.m_recentViews.contains("77"));
+        Messenger::DiffTransaction delta{};
+        delta.pages = {QJsonObject{{"conversations_info", QJsonArray{QJsonObject{
+            {"conversation", QJsonObject{{"peer", QJsonObject{{"id", 77}}}, {"last_conversation_message_id", 3}}},
+            {"message", QJsonArray{QJsonObject{{"id", 902}, {"conversation_message_id", 3}, {"peer_id", 77}, {"text", "New"}}}}}}}}};
+        messenger.applyDiff(delta);
+        QVERIFY(!messenger.m_recentViews.contains("77"));
+        QCOMPARE(messenger.m_histories.value("77").size(), 3);
+        messenger.selectConversation("77", "Первый чат");
+        QCOMPARE(messenger.messages()->rowCount(), 3);
+        QCOMPARE(messenger.messages()->get(2).value("text").toString(), QString("New"));
+        QCOMPARE(messenger.draftText(), QString("Черновик"));
+        messenger.logout(); QVERIFY(messenger.m_rawConversations.isEmpty()); QVERIFY(messenger.m_recentViews.isEmpty());
     }
 
     void photoGalleryOpensClickedPhotoAndNavigates()
@@ -3787,6 +4056,99 @@ private slots:
         QCOMPARE(messenger.draftText(), "Сохранить черновик получателя");
     }
 
+    void deletionSignalsOnlyConfirmedRequestedMessages_data()
+    {
+        QTest::addColumn<QByteArray>("response");
+        QTest::addColumn<QStringList>("deleted");
+        QTest::addColumn<bool>("forEveryone");
+        QTest::newRow("all") << QByteArray(R"({"response":1})") << QStringList{"3", "4"} << true;
+        QTest::newRow("partial-array") << QByteArray(R"({"response":[{"conversation_message_id":3,"response":1},{"conversation_message_id":3,"response":1},{"conversation_message_id":4,"error":15,"response":0},{"conversation_message_id":99,"response":1},{"peer_id":88,"conversation_message_id":4,"response":1}]})") << QStringList{"3"} << false;
+        QTest::newRow("global-id-map") << QByteArray(R"({"response":{"900":1,"901":0,"999":1}})") << QStringList{"3"} << false;
+        QTest::newRow("cmid-map") << QByteArray(R"({"response":{"3":1,"4":1}})") << QStringList{"3", "4"} << false;
+        QTest::newRow("global-id-array") << QByteArray(R"({"response":[{"message_id":901,"response":1},{"message_id":900,"response":1}]})") << QStringList{"3", "4"} << true;
+        QTest::newRow("empty-map") << QByteArray(R"({"response":{}})") << QStringList{} << true;
+        QTest::newRow("unexpected-number") << QByteArray(R"({"response":2})") << QStringList{} << true;
+        QTest::newRow("denied") << QByteArray(R"({"error":{"error_code":15,"error_msg":"Denied"}})") << QStringList{} << true;
+    }
+    void deletionSignalsOnlyConfirmedRequestedMessages()
+    {
+        QFETCH(QByteArray, response); QFETCH(QStringList, deleted); QFETCH(bool, forEveryone);
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":4},"message":[{"id":900,"conversation_message_id":3,"peer_id":77,"out":1,"text":"First"},{"id":901,"conversation_message_id":4,"peer_id":77,"out":1,"text":"Second"}]}]}})"};
+        network.responses["messages.delete"] = {response};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        messenger.selectConversation("77", "Собеседник"); QTRY_COMPARE(messenger.messages()->rowCount(), 2);
+        auto actions = messenger.actions(); QSignalSpy confirmations(actions, &ActionController::messagesDeleted);
+        QSignalSpy starts(actions, &ActionController::messagesDeletionStarted);
+        actions->deleteMessages("77", {"3", "4", "3"}, forEveryone);
+        QCOMPARE(starts.count(), 1);
+        QCOMPARE(starts.first().at(0).toString(), QString("77"));
+        QCOMPARE(starts.first().at(1).toStringList(), (QStringList{"3", "4"}));
+        QTRY_COMPARE(network.replies["messages.delete"].size(), 1);
+        QTRY_VERIFY(!actions->busy());
+        QCOMPARE(confirmations.count(), deleted.isEmpty() ? 0 : 1);
+        if (!deleted.isEmpty()) {
+            QCOMPARE(confirmations.first().at(0).toString(), QString("77"));
+            QCOMPARE(confirmations.first().at(1).toStringList(), deleted);
+        }
+        QCOMPARE(actions->error().isEmpty(), deleted.size() == 2);
+        const auto restorable = messenger.property("restorable").toList();
+        QCOMPARE(restorable.size(), forEveryone ? 0 : deleted.size());
+        for (qsizetype index = 0; index < restorable.size(); ++index) {
+            QCOMPARE(restorable[index].toMap().value("peer_id").toString(), QString("77"));
+            QCOMPARE(restorable[index].toMap().value("cmid").toString(), deleted[index]);
+        }
+        for (const auto &request : network.requests) if (request.first.path().endsWith("messages.delete")) {
+            const QUrlQuery params(QString::fromUtf8(request.second));
+            QCOMPARE(params.queryItemValue("cmids", QUrl::FullyDecoded), QString("3,4"));
+        }
+    }
+    void deletionStartsOnlyForLiveIdleRequests()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":3},"message":[{"id":900,"conversation_message_id":3,"peer_id":77,"out":1,"text":"Original"}]}]}})"};
+        Messenger messenger(nullptr, &network); auto actions = messenger.actions();
+        QSignalSpy starts(actions, &ActionController::messagesDeletionStarted);
+        actions->deleteMessages("77", {"3"}, false);
+        QCOMPARE(starts.count(), 0); QVERIFY(!actions->busy());
+        messenger.startDemo();
+        actions->deleteMessages("77", {"3"}, false);
+        QCOMPARE(starts.count(), 0); QVERIFY(!actions->busy());
+        messenger.logout();
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        actions->deleteMessages("77", {"0", "-2", "invalid"}, false);
+        QCOMPARE(starts.count(), 0);
+        actions->deleteMessages("77", {"3", "3"}, false);
+        QCOMPARE(starts.count(), 1); QVERIFY(actions->busy());
+        QCOMPARE(starts.first().at(1).toStringList(), QStringList{"3"});
+        actions->deleteMessages("77", {"4"}, false);
+        QCOMPARE(starts.count(), 1);
+        QTRY_COMPARE(network.replies["messages.delete"].size(), 1);
+    }
+    void deletionDoesNotSignalAfterActionOrSessionReset_data()
+    {
+        QTest::addColumn<bool>("logout");
+        QTest::newRow("action-reset") << false;
+        QTest::newRow("logout") << true;
+    }
+    void deletionDoesNotSignalAfterActionOrSessionReset()
+    {
+        QFETCH(bool, logout);
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":3},"message":[{"id":900,"conversation_message_id":3,"peer_id":77,"out":1,"text":"Original"}]}]}})"};
+        Messenger messenger(nullptr, &network);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        auto actions = messenger.actions(); QSignalSpy confirmations(actions, &ActionController::messagesDeleted);
+        actions->deleteMessages("77", {"3"}, false);
+        QTRY_COMPARE(network.replies["messages.delete"].size(), 1);
+        const auto reply = network.replies["messages.delete"].first(); QVERIFY(reply);
+        if (logout) messenger.logout(); else actions->reset();
+        if (reply) reply->deliver(R"({"response":1})");
+        QTest::qWait(20);
+        QCOMPARE(confirmations.count(), 0); QVERIFY(messenger.property("restorable").toList().isEmpty());
+    }
+
     void longPollEchoBeforeHttpKeepsIdentityAndCannotRecreateOutbox()
     {
         TokenNetwork network;
@@ -3894,6 +4256,155 @@ private slots:
         QCOMPARE(events.count(), 9);
         messenger.logout();
         QCOMPARE(messenger.property("unreadCount").toInt(), 0);
+    }
+
+    void liveMessagesAndTypingKeepViewportStable()
+    {
+        Messenger messenger; messenger.startDemo(); messenger.setReduceMotion(false);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        window->requestActivate(); QTRY_VERIFY(window->isActive());
+        auto history = window->findChild<QQuickItem *>("historyList"); QVERIFY(history);
+        auto indicator = window->findChild<QQuickItem *>("typingIndicator"); QVERIFY(indicator);
+        auto composer = window->findChild<QQuickItem *>("composer"); QVERIFY(composer);
+        QVariantList rows;
+        const auto append = [&](int id) {
+            rows.append(QVariantMap{{"id", QString::number(id)}, {"cmid", QString::number(id)}, {"text", QString("Сообщение %1").arg(id)}});
+        };
+        for (int i = 1; i <= 80; ++i) append(i);
+        messenger.messages()->replace(rows);
+        const auto apply = [&] { messenger.historyAboutToChange(); messenger.messages()->reconcile(rows); messenger.historyChanged(); };
+        auto content = history->property("contentItem").value<QQuickItem *>(); QVERIFY(content);
+        const auto row = [&](QString id) -> QQuickItem * {
+            for (auto child : content->childItems())
+                if (child->objectName() == "messageRow" && child->property("item").toMap().value("id") == id) return child;
+            return nullptr;
+        };
+        QTRY_VERIFY(row("80") && history->property("atYEnd").toBool());
+        append(81); apply();
+        QTRY_VERIFY(row("81") && row("81")->opacity() < 1);
+        QTRY_COMPARE(row("81")->opacity(), 1.0);
+        QTRY_VERIFY(history->property("atYEnd").toBool());
+        auto last = row("81");
+        auto updated = rows.last().toMap(); updated["edited"] = true; rows.last() = updated;
+        apply(); QCoreApplication::processEvents();
+        QCOMPARE(row("81"), last); QCOMPARE(last->opacity(), 1.0);
+        append(82); apply(); QTest::qWait(30);
+        append(83); apply();
+        QTRY_VERIFY(row("83") && row("83")->opacity() == 1.0 && history->property("atYEnd").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(history, "movementStarted"));
+        QVERIFY(QMetaObject::invokeMethod(history, "positionViewAtIndex", Q_ARG(int, 30), Q_ARG(int, 0)));
+        history->setProperty("contentY", history->property("contentY").toReal() + 15);
+        QTest::qWait(80);
+        const auto height = history->height(), composerY = composer->mapToScene({}).y();
+        QSignalSpy scrolls(history, SIGNAL(contentYChanged()));
+        messenger.applyLongPoll({QJsonValue(QJsonArray{61, 2, 1})});
+        QVERIFY(!indicator->isVisible());
+        messenger.applyLongPoll({QJsonValue(QJsonArray{61, 1, 1})});
+        QVERIFY(indicator->isVisible());
+        QVERIFY(indicator->mapToScene({}).y() >= history->mapToScene(QPointF(0, height)).y());
+        QVERIFY(indicator->mapToScene(QPointF(0, indicator->height())).y() <= composerY);
+        QTRY_VERIFY(indicator->property("phase").toReal() > 0);
+        messenger.setReduceMotion(true);
+        QVERIFY(indicator->isVisible()); QVERIFY(!indicator->property("animating").toBool());
+        for (int i = 84; i <= 92; ++i) { append(i); apply(); }
+        messenger.applyLongPoll({QJsonValue(QJsonArray{4, 92, 0, 1})});
+        QTest::qWait(80);
+        QVERIFY(!indicator->isVisible()); QCOMPARE(history->height(), height);
+        QCOMPARE(composer->mapToScene({}).y(), composerY);
+        QCOMPARE(scrolls.count(), 0);
+        QCOMPARE(window->property("newMessages").toInt(), 9);
+        QCOMPARE(warnings.count(), 0);
+    }
+
+    void confirmedDeletionExplodesAndReleasesVisuals()
+    {
+        Messenger messenger; messenger.startDemo(); messenger.setReduceMotion(false); messenger.setFlatMessages(false);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        window->requestActivate(); QTRY_VERIFY(window->isActive());
+        auto explosion = window->findChild<QQuickItem *>("messageExplosion"); QVERIFY(explosion);
+        auto composer = window->findChild<QQuickItem *>("composer"); QVERIFY(composer);
+        composer->setProperty("text", "Черновик сохраняется");
+        const auto original = messenger.messages()->rows; QVERIFY(original.size() >= 3);
+        const auto id = original.last().toMap().value("id").toString();
+        QTest::qWait(100);
+        messenger.actions()->messagesDeleted(messenger.selectedPeer(), {id});
+        messenger.messages()->reconcile(original.first(original.size() - 1));
+        QTRY_COMPARE(explosion->property("runningBursts").toInt(), 1);
+        QTest::qWait(130);
+        if (qEnvironmentVariableIsSet("VKM_EXPLOSION_SCREENSHOT")) QVERIFY(window->grabWindow().save(qEnvironmentVariable("VKM_EXPLOSION_SCREENSHOT")));
+        QCOMPARE(composer->property("text").toString(), QString("Черновик сохраняется"));
+        QTRY_COMPARE(explosion->property("runningBursts").toInt(), 0);
+        QTRY_COMPARE(window->property("pendingExplosionCaptures").toInt(), 0);
+        QTRY_VERIFY(explosion->childItems().isEmpty());
+
+        // History eviction, a chat switch, or another user's deletion must not explode.
+        messenger.messages()->reconcile(original); QTest::qWait(80);
+        messenger.messages()->reconcile(original.first(original.size() - 1)); QTest::qWait(200);
+        QCOMPARE(explosion->property("runningBursts").toInt(), 0);
+        messenger.messages()->reconcile(original); QTest::qWait(80);
+        messenger.setReduceMotion(true);
+        auto selected = engine.newArray(1); selected.setProperty(0, id);
+        window->setProperty("selectedIds", QVariant::fromValue(selected));
+        messenger.actions()->messagesDeleted(messenger.selectedPeer(), {id});
+        QCOMPARE(window->property("selectedIds").value<QJSValue>().property("length").toInt(), 0);
+        messenger.messages()->reconcile(original.first(original.size() - 1)); QTest::qWait(200);
+        QCOMPARE(explosion->property("runningBursts").toInt(), 0);
+
+        // A bulk delete has a strict visual budget and deactivation frees it immediately.
+        messenger.setReduceMotion(false);
+        for (int i = 0; i < 7; ++i) {
+            QVariant accepted;
+            QVERIFY(QMetaObject::invokeMethod(explosion, "burst", Q_RETURN_ARG(QVariant, accepted),
+                Q_ARG(QVariant, QRectF(100, 100, 200, 60)), Q_ARG(QVariant, QVariant())));
+            QCOMPARE(accepted.toBool(), i < 4);
+        }
+        QCOMPARE(explosion->property("runningBursts").toInt(), 4);
+        explosion->setProperty("windowActive", false);
+        QCOMPARE(explosion->property("runningBursts").toInt(), 0);
+        QTRY_VERIFY(explosion->childItems().isEmpty());
+    }
+
+    void deletionKeepsEarlyRemovalSnapshotAndCancelsOnChatSwitch()
+    {
+        TokenNetwork network;
+        network.responses["messages.getDiff"] = {R"({"response":{"server_version":"500","credentials":{"server_lp":"lp.test/im","key":"key","ts":"100"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":3},"message":[{"id":900,"conversation_message_id":1,"peer_id":77,"out":1,"text":"Первое"},{"id":901,"conversation_message_id":2,"peer_id":77,"out":1,"text":"Второе"},{"id":902,"conversation_message_id":3,"peer_id":77,"out":1,"text":"Удаляемое сообщение"}]}]}})"};
+        Messenger messenger(nullptr, &network); messenger.setReduceMotion(false);
+        QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+        engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+        auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+        window->requestActivate(); QTRY_VERIFY(window->isActive());
+        auto explosion = window->findChild<QQuickItem *>("messageExplosion"); QVERIFY(explosion);
+        messenger.loginWithToken("test-token"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+        messenger.selectConversation("77", "Собеседник"); QTRY_COMPARE(messenger.messages()->rowCount(), 3);
+        QTest::qWait(100);
+        const auto original = messenger.messages()->rows;
+        messenger.actions()->deleteMessages("77", {"3"}, true);
+        QTRY_COMPARE(network.replies["messages.delete"].size(), 1);
+        messenger.messages()->reconcile(original.first(2)); // Long Poll arrives before HTTP.
+        QTRY_VERIFY(window->property("removedDeletionFrames").value<QJSValue>().property("length").toInt() == 1);
+        QCOMPARE(explosion->property("runningBursts").toInt(), 0);
+        network.replies["messages.delete"].first()->deliver(R"({"response":1})");
+        QTRY_COMPARE(explosion->property("runningBursts").toInt(), 1);
+        QTRY_COMPARE(explosion->property("runningBursts").toInt(), 0);
+        QCOMPARE(window->property("pendingExplosionCaptures").toInt(), 0);
+
+        messenger.messages()->reconcile(original); QTest::qWait(80);
+        messenger.actions()->deleteMessages("77", {"3"}, true);
+        QTRY_COMPARE(network.replies["messages.delete"].size(), 2);
+        messenger.messages()->reconcile(original.first(2));
+        messenger.selectConversation("88", "Другая переписка");
+        QTRY_COMPARE(window->property("pendingExplosionCaptures").toInt(), 0);
+        QCOMPARE(window->property("removedDeletionFrames").value<QJSValue>().property("length").toInt(), 0);
+        network.replies["messages.delete"].last()->deliver(R"({"response":1})");
+        QTest::qWait(200);
+        QCOMPARE(explosion->property("runningBursts").toInt(), 0);
+        QVERIFY(explosion->childItems().isEmpty());
     }
 
     void typingExpires()
@@ -4064,6 +4575,408 @@ void MessengerTest::searchAndComposerControlsWorkInBothThemes()
     }
     window->resize(780, 560); QTest::qWait(100);
     QVERIFY(composer->width() >= 200);
+}
+
+void MessengerTest::autoRepliesUseOnlyChatHistoryAndCurrentNotes_data()
+{
+    QTest::addColumn<QString>("model");
+    QTest::addColumn<bool>("publicVk");
+    QTest::addColumn<bool>("disableBeforeSend");
+    QTest::newRow("polza-private-vk") << QString("openai/gpt-6.2-sol") << false << false;
+    QTest::newRow("polza-public-vk") << QString("openai/gpt-4.1-mini") << true << false;
+    QTest::newRow("disable-before-vk-dispatch") << QString("openai/gpt-4.1") << false << true;
+}
+
+void MessengerTest::autoRepliesUseOnlyChatHistoryAndCurrentNotes()
+{
+    QFETCH(QString, model);
+    QFETCH(bool, publicVk);
+    QFETCH(bool, disableBeforeSend);
+    TokenNetwork network;
+    const QString endpoint = "responses";
+    const QString historyMethod = publicVk ? "messages.getHistory" : "messages.getDiffContent";
+    auto message = [](int peer, int cmid, const QString &text, bool out = false) {
+        return QJsonObject{{"peer_id", peer}, {"conversation_message_id", cmid}, {"from_id", out ? 42 : peer},
+                           {"text", text}, {"out", out ? 1 : 0}, {"attachments", QJsonArray{"private-attachment"}}};
+    };
+    const auto style = message(77, 1, "ага, до связи))", true);
+    auto incoming = message(77, 2, "когда встретимся?");
+    incoming.insert("action", QJsonValue::Null);
+    const auto unrelated = message(88, 2, "private-other-chat");
+    auto snapshot = [&](const QJsonObject &last) {
+        QJsonArray items;
+        for (const auto &msg : {last, unrelated}) {
+            QJsonObject conversation{{"peer", QJsonObject{{"id", msg.value("peer_id")}}},
+                {"last_conversation_message_id", msg.value("conversation_message_id")}};
+            auto preview = msg;
+            if (!publicVk && msg == incoming) {
+                // Incremental VK updates can give the CMID only on the message and omit the text.
+                conversation.remove("last_conversation_message_id");
+                preview.remove("text");
+            }
+            items.append(publicVk ? QJsonObject{{"conversation", conversation}, {"last_message", msg}}
+                                  : QJsonObject{{"conversation", conversation}, {"message", QJsonArray{preview}}});
+        }
+        const QJsonObject result = publicVk ? QJsonObject{{"items", items}, {"count", items.size()}}
+            : QJsonObject{{"server_version", QString::number(last.value("conversation_message_id").toInt())},
+                {"credentials", QJsonObject{{"server_lp", "lp.test/im"}, {"key", "lp-key"}, {"ts", "1"}}}, {"conversations_info", items}};
+        return QJsonDocument(QJsonObject{{"response", result}}).toJson();
+    };
+    const QString sync = publicVk ? "messages.getConversations" : "messages.getDiff";
+    if (publicVk) network.responses["messages.getDiff"] = {R"({"error":{"error_code":3}})"};
+    network.responses[sync] = {snapshot(style)};
+    const QJsonArray history{incoming, unrelated, style};
+    const auto page = QJsonDocument(QJsonObject{{"response", QJsonObject{{"items", publicVk ? history :
+        QJsonArray{QJsonObject{{"peer_id", 77}, {"messages", history}}}}}}}).toJson();
+    network.responses[historyMethod] = {page, page};
+    Messenger messenger(nullptr, &network);
+    messenger.loginWithToken("vk-fixture");
+    QTRY_COMPARE(messenger.conversations()->rowCount(), 2);
+    auto controller = messenger.autoReply();
+    controller->saveNotes("77", "old instruction");
+    controller->saveNotes("88", "private-other-note");
+    QCOMPARE(controller->enable("77", model, "llm-fixture"), QString());
+    QVERIFY(!controller->settings("88").value("enabled").toBool());
+#ifdef Q_OS_MACOS
+    QVERIFY(controller->sleepProtected());
+#endif
+    QCOMPARE(network.replies[endpoint].size(), 0);
+    network.responses[sync] = {snapshot(incoming)};
+    const auto update = publicVk ? QJsonArray{4, 101, 0, 77, 1} : QJsonArray{10004, 2, 0, 0, 77};
+    messenger.applyLongPoll(QJsonArray{update});
+    QTRY_COMPARE(network.replies[endpoint].size(), 1);
+    QCOMPARE(controller->settings("77").value("status").toString(), "Polza.ai готовит ответ…");
+    QVERIFY(messenger.selectedPeer().isEmpty());
+    const auto oldReply = network.replies[endpoint].first();
+    controller->saveNotes("77", "по пятницам после шести");
+    QVERIFY(!oldReply || oldReply->isFinished());
+    QTRY_COMPARE(network.replies[endpoint].size(), 2);
+    const auto reply = network.replies[endpoint].last();
+    QCOMPARE(reply->request().rawHeader("Authorization"), "Bearer llm-fixture");
+    QVERIFY(!reply->request().hasRawHeader("x-api-key"));
+    QCOMPARE(reply->url(), QUrl("https://polza.ai/api/v1/responses"));
+    QByteArray payload;
+    for (const auto &request : network.requests) if (request.first == reply->url()) payload = request.second;
+    const auto body = QJsonDocument::fromJson(payload).object();
+    QCOMPARE(body.value("model").toString(), model);
+    QVERIFY(!body.contains("messages") && !body.contains("max_completion_tokens"));
+    QVERIFY(body.value("max_output_tokens").toInt() > 0);
+    if (model == "openai/gpt-6.2-sol") QCOMPARE(body.value("reasoning").toObject().value("effort").toString(), "low");
+    else QVERIFY(!body.contains("reasoning"));
+    QVERIFY(!body.value("store").toBool(true));
+    QVERIFY(body.value("instructions").toString().contains("по пятницам после шести"));
+    QVERIFY(!payload.contains("old instruction") && !payload.contains("private-other")
+        && !payload.contains("private-attachment") && !payload.contains("vk-fixture") && !payload.contains("llm-fixture"));
+    const auto transcript = QJsonDocument::fromJson(body.value("input").toString().toUtf8()).array();
+    QCOMPARE(transcript.size(), 2);
+    QCOMPARE(transcript.first().toObject().value("author").toString(), "me");
+    QCOMPARE(transcript.first().toObject().value("text"), style.value("text"));
+    QCOMPARE(transcript.last().toObject().value("text"), incoming.value("text"));
+
+    // A repeated sync while the completion is pending must not start another reply.
+    network.responses[sync] = {snapshot(incoming)};
+    messenger.reload();
+    network.responses["messages.send"] = {R"({"response":345})"};
+    if (disableBeforeSend) messenger.m_api.request("messages.getHistoryAttachments", {}, [](const ApiResult &) {});
+    reply->deliver(R"({"status":"completed","output":[
+        {"type":"reasoning","summary":[{"text":"private reasoning"}]},
+        {"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"working"}]},
+        {"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"давай "},{"type":"output_text","text":"в пятницу!"}]}
+    ]})");
+    if (disableBeforeSend) {
+        controller->disable("77");
+        QTest::qWait(800);
+        QCOMPARE(network.replies["messages.send"].size(), 0);
+        QVERIFY(!controller->sleepProtected());
+        return;
+    }
+    QTRY_COMPARE(network.replies["messages.send"].size(), 1);
+    for (const auto &request : network.requests) if (request.first.path().endsWith("messages.send")) {
+        const QUrlQuery sent(QString::fromUtf8(request.second));
+        QCOMPARE(sent.queryItemValue("peer_id"), "77");
+        QCOMPARE(sent.queryItemValue("message", QUrl::FullyDecoded), "давай в пятницу!");
+        QVERIFY(sent.queryItemValue("random_id").toLongLong() > 0);
+    }
+    QCOMPARE(network.replies[endpoint].size(), 2);
+    // Restoring another account must not expose this account's configuration.
+    messenger.logout();
+    QVERIFY(controller->settings("77").value("notes").toString().isEmpty());
+    QVERIFY(!controller->sleepProtected());
+    controller->setAccount("user:123");
+    QVERIFY(controller->settings("77").value("notes").toString().isEmpty());
+    controller->setAccount("user:42");
+    QCOMPARE(controller->settings("77").value("notes").toString(), "по пятницам после шести");
+    QVERIFY(controller->settings("77").value("enabled").toBool());
+    controller->disable("77");
+    QVERIFY(!controller->sleepProtected());
+    QVERIFY(!QJsonDocument::fromVariant(controller->settings("77")).toJson().contains("llm-fixture"));
+}
+
+void MessengerTest::autoReplyStaysActiveDuringSessionRefresh()
+{
+    TokenNetwork network;
+    network.responses["messages.getDiff"] = {R"({"response":{"server_version":"1","credentials":{"server_lp":"lp.test/im","key":"key","ts":"1"},"conversations_info":[{"conversation":{"peer":{"id":77}}},{"conversation":{"peer":{"id":88}}}]}})"};
+    Messenger messenger(nullptr, &network, {}, false);
+    messenger.acceptSession({{"user_id", 42}, {"access_token", "vk-fixture"}, {"refresh_token", "refresh-fixture"}});
+    QTRY_COMPARE(messenger.conversations()->rowCount(), 2);
+    auto controller = messenger.autoReply();
+    const QString model = "openai/gpt-6.2-sol";
+    QVERIFY(!controller->sleepProtected());
+    QCOMPARE(controller->enable("77", model, "polza-fixture"), QString());
+    QCOMPARE(controller->enable("88", model, {}), QString());
+    controller->disable("77");
+
+    // No foreground window. Keep the activity and the in-memory key while VK renews the login.
+    messenger.m_refresh.start(0);
+    QTRY_COMPARE(network.replies["auth"].size(), 1);
+    QVERIFY(messenger.m_authorizing);
+    QVERIFY(controller->settings("88").value("enabled").toBool());
+#ifdef Q_OS_MACOS
+    QVERIFY(controller->sleepProtected());
+#endif
+    QString state;
+    for (const auto &request : network.requests)
+        if (request.first.path().endsWith("/auth"))
+            state = QUrlQuery(QString::fromUtf8(request.second)).queryItemValue("state");
+    QVERIFY(!state.isEmpty());
+    network.replies["auth"].last()->deliver(QJsonDocument(QJsonObject{
+        {"access_token", "renewed-fixture"}, {"user_id", 42}, {"state", state}}).toJson());
+    QVERIFY(!messenger.m_authorizing);
+    QVERIFY(controller->hasSavedToken());
+    QVERIFY(controller->settings("88").value("enabled").toBool());
+#ifdef Q_OS_MACOS
+    QVERIFY(controller->sleepProtected());
+#endif
+    messenger.m_refresh.start(0);
+    QTRY_COMPARE(network.replies["auth"].size(), 2);
+    network.replies["auth"].last()->deliver(R"({"error":"invalid_grant"})");
+    QVERIFY(!controller->sleepProtected());
+}
+
+void MessengerTest::autoReplyToggleAndChatNotes()
+{
+    TokenNetwork network;
+    network.responses["messages.getDiff"] = {R"({"response":{"server_version":"1","credentials":{"server_lp":"lp.test/im","key":"key","ts":"1"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":1},"message":[{"conversation_message_id":1,"peer_id":77,"text":"Привет"}]}]}})"};
+    Messenger messenger(nullptr, &network);
+    messenger.loginWithToken("vk-fixture"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+    messenger.selectConversation("77", "Анна");
+
+    QQmlApplicationEngine engine; engine.rootContext()->setContextProperty("messenger", &messenger);
+    engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+    auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    QVERIFY(window); window->resize(780, 560);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto dialog = window->findChild<QObject *>("autoReplyDialog"); QVERIFY(dialog);
+    auto menu = window->findChild<QObject *>("autoReplyMenuItem"); QVERIFY(menu);
+    QVERIFY(QMetaObject::invokeMethod(menu, "triggered")); QTRY_VERIFY(dialog->property("opened").toBool());
+    auto toggle = dialog->findChild<QQuickItem *>("autoReplyToggle"); QVERIFY(toggle);
+    auto key = dialog->findChild<QQuickItem *>("autoReplyApiKey"); QVERIFY(key);
+    auto notes = dialog->findChild<QObject *>("autoReplyNotes"); QVERIFY(notes);
+    QCOMPARE(key->property("echoMode").toInt(), 2);
+    const auto clickToggle = [&] { QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+        toggle->mapToScene(QPointF(toggle->width()/2, toggle->height()/2)).toPoint()); };
+    QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+    window->update(); QTRY_VERIFY(!frames.isEmpty());
+    clickToggle();
+    QVERIFY(!toggle->property("checked").toBool());
+    QVERIFY(!dialog->property("feedback").toString().isEmpty());
+    QVERIFY(!dialog->findChild<QQuickItem *>("autoReplyProvider"));
+    auto models = dialog->findChild<QQuickItem *>("autoReplyModel"); QVERIFY(models);
+    QCOMPARE(models->property("currentText").toString(), "openai/gpt-6.2-sol");
+    key->setProperty("text", "first-token");
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close")); QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(savedKeys.value("auto-reply/user:42/polza"), "first-token");
+    QVERIFY(QMetaObject::invokeMethod(menu, "triggered")); QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(key->property("text").toString().isEmpty());
+    QVERIFY(key->property("placeholderText").toString().contains("сохранён"));
+    models->forceActiveFocus(); QTest::keyClick(window, Qt::Key_Down);
+    const auto chosen = models->property("currentText").toString();
+    QCOMPARE(chosen, "openai/gpt-4.1-mini");
+    key->setProperty("text", "fixture"); notes->setProperty("text", "по средам дома");
+    auto sample = dialog->findChild<QQuickItem *>("autoReplySample"); QVERIFY(sample);
+    network.responses["responses"] = {R"({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Привет!"}]}]})"};
+    QVERIFY(QMetaObject::invokeMethod(sample, "clicked"));
+    QTRY_VERIFY(dialog->property("feedback").toString().contains("Привет!"));
+    QCOMPARE(savedKeys.value("auto-reply/user:42/polza"), "fixture");
+    QVERIFY(key->property("text").toString().isEmpty());
+    QVERIFY(network.replies["messages.send"].isEmpty());
+    clickToggle(); QTRY_VERIFY(toggle->property("checked").toBool());
+    QVERIFY(messenger.autoReply()->settings("77").value("enabled").toBool());
+    QCOMPARE(savedKeys.value("auto-reply/user:42/polza"), "fixture");
+    QCOMPARE(key->property("text").toString(), QString());
+    QCOMPARE(messenger.autoReply()->settings("77").value("model").toString(), chosen);
+    notes->setProperty("text", "по средам в офисе");
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close")); QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(messenger.autoReply()->settings("77").value("notes").toString(), "по средам в офисе");
+    QVERIFY(QMetaObject::invokeMethod(menu, "triggered")); QTRY_VERIFY(dialog->property("opened").toBool());
+    QCOMPARE(models->property("currentText").toString(), chosen);
+    clickToggle(); QTRY_VERIFY(!messenger.autoReply()->settings("77").value("enabled").toBool());
+    QVERIFY(!messenger.autoReply()->sleepProtected());
+}
+
+void MessengerTest::autoReplyChecksModelAccess()
+{
+    TokenNetwork network;
+    Messenger messenger(nullptr, &network, {}, false);
+    auto controller = messenger.autoReply();
+    controller->setAccount("user:42");
+    QSignalSpy result(controller, &AutoReplyController::modelChecked);
+    const QString model = "openai/gpt-6.2-sol";
+    for (const auto &foreignKey : {"sk-ant-example", "sk-proj-example", "sk-svcacct-example"}) {
+        controller->checkModel(model, foreignKey, false);
+        QCOMPARE(result.size(), 1);
+        QVERIFY(result.takeFirst()[0].toString().contains("Polza.ai"));
+    }
+    QVERIFY(network.requests.isEmpty());
+
+    const auto check = [&](bool generate) {
+        controller->checkModel(model, "fixture-private", generate);
+        return network.replies[generate ? "responses" : "key"].last();
+    };
+    auto reply = check(false);
+    QCOMPARE(reply->url(), QUrl("https://polza.ai/api/v1/key"));
+    QCOMPARE(reply->request().rawHeader("Authorization"), "Bearer fixture-private");
+    QVERIFY(network.requests.last().second.isEmpty());
+    reply->deliver(R"({"label":"pza_masked","usage":0})");
+    QCOMPARE(result.takeFirst()[0].toString(), QString());
+    check(false)->deliver(R"({})");
+    QVERIFY(!result.takeFirst()[0].toString().isEmpty());
+
+    reply = check(true);
+    QCOMPARE(reply->url(), QUrl("https://polza.ai/api/v1/responses"));
+    const auto sample = QJsonDocument::fromJson(network.requests.last().second).object();
+    QCOMPARE(sample.value("model").toString(), model);
+    QCOMPARE(sample.value("input").toString(), "Скажи привет.");
+    QVERIFY(!sample.value("store").toBool(true));
+    reply->deliver(R"({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Привет!"}]}]})");
+    const auto success = result.takeFirst();
+    QCOMPARE(success[0].toString(), QString());
+    QCOMPARE(success[1].toString(), "Привет!");
+    for (const auto status : {401, 403, 404, 429}) {
+        check(true)->deliver(R"({"error":{"message":"sensitive provider echo fixture-private"}})", status);
+        const auto diagnostic = result.takeFirst()[0].toString();
+        QVERIFY(diagnostic.contains(QString::number(status)) && !diagnostic.contains("fixture-private"));
+    }
+    check(true)->deliver(R"({"error":{"code":"insufficient_quota"}})", 429);
+    QVERIFY(result.takeFirst()[0].toString().contains("баланс"));
+    check(true)->deliver(R"({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]})");
+    const auto incomplete = result.takeFirst();
+    QVERIFY(incomplete[0].toString().contains("лимит"));
+    QVERIFY(incomplete[1].toString().isEmpty());
+    check(true)->deliver(R"({"status":"completed","output":[],"output_text":"Привет!"})");
+    QCOMPARE(result.takeFirst()[1].toString(), "Привет!");
+    check(true)->deliver(R"({"status":"completed","output":[]})");
+    QVERIFY(result.takeFirst()[0].toString().contains("без текста"));
+    reply = check(true);
+    controller->cancelModelCheck();
+    QVERIFY(!reply || reply->isFinished()); QVERIFY(result.isEmpty());
+    QVERIFY(network.replies["messages.send"].isEmpty());
+}
+
+void MessengerTest::autoReplyRemembersPolzaTokenAcrossRestarts()
+{
+    const QByteArray slot = "auto-reply/user:42/polza";
+    const QString model = "openai/gpt-6.2-sol";
+    TokenNetwork network;
+    {
+        Messenger messenger(nullptr, &network);
+        auto controller = messenger.autoReply();
+        controller->setAccount("user:42");
+        controller->editToken("pza_first");
+        controller->checkModel(model, "pza_first", false);
+        network.replies["key"].last()->deliver(R"({"label":"pza_masked"})");
+        QCOMPARE(savedKeys.value(slot), "pza_first");
+        controller->editToken("pza_denied");
+        controller->checkModel(model, "pza_denied", false);
+        network.replies["key"].last()->deliver("{}", 401);
+        QCOMPARE(controller->saveEditedToken(), QString());
+        QCOMPARE(savedKeys.value(slot), "pza_first");
+
+        controller->editToken("pza_replacement");
+        refuseKeyWrite = true;
+        QVERIFY(!controller->saveEditedToken().isEmpty());
+        QCOMPARE(savedKeys.value(slot), "pza_first");
+        refuseKeyWrite = false;
+        controller->setAccount("user:77");
+        QCOMPARE(savedKeys.value(slot), "pza_replacement");
+        QVERIFY(!controller->hasSavedToken());
+        QVERIFY(!savedKeys.contains("auto-reply/user:77/polza"));
+    }
+    Messenger restarted(nullptr, &network);
+    auto controller = restarted.autoReply();
+    controller->setAccount("user:42");
+    QVERIFY(controller->hasSavedToken());
+    controller->checkModel(model, {}, false);
+    QCOMPARE(network.replies["key"].last()->request().rawHeader("Authorization"), "Bearer pza_replacement");
+}
+
+void MessengerTest::autoReplyMigratesOtherProviders()
+{
+    TokenNetwork network;
+    Messenger messenger(nullptr, &network);
+    const QString settingsGroup = "autoReply/user:42/";
+    const QVariantMap legacy{{"provider", "anthropic"}, {"model", "claude-haiku-4-5"}, {"enabled", true},
+                             {"since", 123}, {"notes", "после шести"}};
+    const QVariantMap openai{{"provider", "openai"}, {"model", "gpt-4.1"}, {"enabled", true}, {"since", 234}};
+    messenger.m_settings.setValue(settingsGroup + "77", legacy);
+    messenger.m_settings.setValue(settingsGroup + "88", openai);
+    auto deepseek = legacy;
+    deepseek.insert("provider", "deepseek"); deepseek.insert("model", "deepseek-flash");
+    messenger.m_settings.setValue(settingsGroup + "99", deepseek);
+    savedKeys.insert("auto-reply/user:42/openai", "previous-provider-fixture");
+    savedKeys.insert("auto-reply/user:42/deepseek", "previous-provider-fixture");
+    savedKeys.insert("auto-reply/user:42/anthropic", "previous-provider-fixture");
+    auto controller = messenger.autoReply();
+    controller->setAccount("user:42");
+    const auto settings = controller->settings("77");
+    QCOMPARE(settings.value("provider").toString(), "polza");
+    QCOMPARE(settings.value("model").toString(), "openai/gpt-6.2-sol");
+    QCOMPARE(settings.value("notes"), legacy.value("notes"));
+    QVERIFY(!settings.value("enabled").toBool());
+    QVERIFY(!settings.contains("since"));
+    QCOMPARE(controller->settings("99"), settings);
+    auto persisted = settings;
+    persisted.remove("error");
+    QCOMPARE(messenger.m_settings.value(settingsGroup + "77").toMap(), persisted);
+    const auto migratedOpenai = messenger.m_settings.value(settingsGroup + "88").toMap();
+    QCOMPARE(migratedOpenai.value("provider").toString(), "polza");
+    QCOMPARE(migratedOpenai.value("model").toString(), "openai/gpt-4.1");
+    QVERIFY(!migratedOpenai.value("enabled").toBool());
+    QVERIFY(!migratedOpenai.contains("since"));
+    QSignalSpy result(controller, &AutoReplyController::modelChecked);
+    controller->checkModel("openai/gpt-6.2-sol", {}, false);
+    QCOMPARE(result.size(), 1);
+    QVERIFY(result.takeFirst()[0].toString().contains("Введите токен"));
+    QVERIFY(network.requests.isEmpty());
+}
+
+void MessengerTest::conversationMenuCollapsesUnavailableActions()
+{
+    TokenNetwork network;
+    network.responses["messages.getDiff"] = {R"({"response":{"server_version":"1","credentials":{"server_lp":"lp.test/im","key":"key","ts":"1"},"conversations_info":[{"conversation":{"peer":{"id":77},"last_conversation_message_id":1}}]}})"};
+    Messenger messenger(nullptr, &network, {}, false);
+    messenger.loginWithToken("fixture"); QTRY_COMPARE(messenger.conversations()->rowCount(), 1);
+    messenger.selectConversation("77", "Контакт");
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty("messenger", &messenger);
+    engine.load(QUrl::fromLocalFile(QStringLiteral(NATIVE_QML_PATH))); QVERIFY(!engine.rootObjects().isEmpty());
+    auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()); QVERIFY(window);
+    auto menu = window->findChild<QObject *>("conversationMenu"); QVERIFY(menu);
+    QVERIFY(QMetaObject::invokeMethod(menu, "open")); QTRY_VERIFY(menu->property("opened").toBool());
+    auto view = menu->property("contentItem").value<QQuickItem *>(); QVERIFY(view);
+    auto rows = view->property("contentItem").value<QQuickItem *>(); QVERIFY(rows);
+    QHash<QString, QQuickItem *> items;
+    for (auto item : rows->childItems()) items.insert(item->property("text").toString(), item);
+    auto first = items.value("Автоответы…"), join = items.value("Вступить по приглашению"),
+         members = items.value("Участники"), read = items.value("Отметить прочитанным");
+    QVERIFY(first && join && members && read);
+    QTRY_COMPARE(join->y(), first->y() + first->height());
+    QCOMPARE(members->height(), 0);
+    QVERIFY(read->y() - (join->y() + join->height()) < first->height()); // Only the separator remains.
+    messenger.selectConversation("2000000001", "Беседа");
+    QTRY_VERIFY(members->height() > 0);
+    QTRY_COMPARE(members->y(), first->y() + first->height());
+    QTRY_VERIFY(join->y() >= members->y() + members->height());
 }
 
 int main(int argc, char **argv)
